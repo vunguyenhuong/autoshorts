@@ -1,0 +1,19 @@
+# Build
+build/
+dist/
+
+# FFmpeg
+ffmpeg/
+
+# Video
+*.mp4
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Downloads
+core/downloads/
+
+# exe
+*.exe
