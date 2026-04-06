@@ -132,31 +132,43 @@ class ShortsProcessor:
     def estimate_compilations(self, source_folder, settings):
         """Estimate how many compilation videos will be created"""
         try:
-            files = self.scan_folder(source_folder, sort_by_views=False)  # Don't sort for estimation
+            files = self.scan_folder(source_folder, sort_by_views=False)
             if not files:
                 return 0
             
             total_duration = 0.0
             speed = settings.get('speed', 1.0)
-            target_duration = settings.get('target_duration', 55)  # Default to 55 seconds
+            target_duration = settings.get('target_duration', 55)
+            min_videos = settings.get('min_videos', 1)
+            duration_mode = settings.get('duration_mode', 'min')
+            only_under_1min = settings.get('only_under_1min', False)
             
-            # Calculate total effective duration using fast method
+            valid_files_count = 0
+            
+            # Calculate total effective duration of VALID videos
             for f_path in files:
                 try:
                     dur = self.get_video_duration_fast(f_path)
                     if dur > 0:
-                        # Account for speed
+                        # Duration check: Skip videos > 55s if under 1 min mode is active or strict filter is ON
+                        if (duration_mode == 'max' or only_under_1min) and dur > 60:
+                            continue
+                            
+                        valid_files_count += 1
                         eff_dur = dur / speed
                         total_duration += eff_dur
                 except:
                     pass
             
-            # Check if we have enough content for at least one compilation
-            if total_duration < target_duration:
+            if valid_files_count < min_videos or total_duration < target_duration:
                 return 0
             
-            estimated_count = int(total_duration / target_duration)
-            return estimated_count
+            # Realistic estimation: total duration divided by target, 
+            # limited by the fact we need at least min_videos per part.
+            est_by_duration = int(total_duration / target_duration)
+            est_by_count = valid_files_count // min_videos
+            
+            return max(1, min(est_by_duration, est_by_count))
         except:
             return 0 
 
@@ -250,9 +262,35 @@ class ShortsProcessor:
             progress_callback(f"🎯 Target compilation length: {target_duration} seconds (min {min_videos} videos)")
 
         batch_idx = 1
-        video_pool = files.copy()
+        
+        # PRE-FILTERING: Filter video pool based on duration if strict mode is on
+        video_pool = []
         discarded_videos = []
         
+        duration_mode = settings.get('duration_mode', 'min')
+        only_under_1min = settings.get('only_under_1min', False)
+        
+        if progress_callback and (duration_mode == 'max' or only_under_1min):
+            progress_callback(f"🛡️ Bật chế độ lọc nghiêm ngặt (chỉ lấy video < 60s)")
+
+        for f in files:
+            dur = self.get_video_duration_fast(f)
+            # If target duration mode is "Under 1 Min" OR user checked "Only Under 1 Min", 
+            # we permanently discard anything over 1 min
+            if (duration_mode == 'max' or only_under_1min) and dur > 60:
+                discarded_videos.append(f)
+                if progress_callback:
+                    progress_callback(f"⏭️ Loại bỏ video > 60s: {os.path.basename(f)}")
+            else:
+                video_pool.append(f)
+        
+        if not video_pool:
+            if progress_callback: progress_callback("No valid videos found after filtering.")
+            # Move discarded to unused anyway
+            if discarded_videos:
+                self._move_to_unused(source_folder, discarded_videos, progress_callback)
+            return
+
         while video_pool:
             if check_cancel and check_cancel(): return
 
@@ -273,17 +311,14 @@ class ShortsProcessor:
                     eff_speed = settings.get('speed', 1.0)
                     eff_dur = dur / eff_speed
                     
-                    # Get duration mode and target
-                    duration_mode = settings.get('duration_mode', 'min')  # 'max' or 'min'
-                    
+                    # Check selection limits
                     if duration_mode == 'max':
-                        # Mode: Under 1 minute (max 55s target, hard limit 60s)
-                        # Check BEFORE adding: if this video exceeds 60s, skip it and look for shorter ones.
+                        # Mode: Under 1 minute (hard limit 60s)
                         if (current_duration + eff_dur) > 60:
                             pool_idx += 1
                             continue
                     
-                    # Add the video to batch (for both modes)
+                    # Add the video to batch
                     current_batch_files.append(f_path)
                     current_duration += eff_dur
                     video_pool.pop(pool_idx)
@@ -291,18 +326,11 @@ class ShortsProcessor:
                     if progress_callback: 
                         progress_callback(f"Adding to Video {batch_idx}: {os.path.basename(f_path)} (Total: {current_duration:.1f}s)")
                     
-                    if duration_mode == 'max':
-                        if current_duration >= target_duration and len(current_batch_files) >= min_videos:
-                            if progress_callback:
-                                progress_callback(f"Batch {batch_idx} complete at {current_duration:.1f}s")
-                            break
-                    elif duration_mode == 'min':
-                        # Mode: Over 1 minute (min 65s target)
-                        # Check AFTER adding: stop if reached target and at least min_videos videos
-                        if current_duration >= target_duration and len(current_batch_files) >= min_videos:
-                            if progress_callback:
-                                progress_callback(f"Batch {batch_idx} complete at {current_duration:.1f}s (reached target {target_duration}s with {len(current_batch_files)} videos)")
-                            break
+                    # Stop if reached target
+                    if current_duration >= target_duration and len(current_batch_files) >= min_videos:
+                        if progress_callback:
+                            progress_callback(f"Batch {batch_idx} complete at {current_duration:.1f}s")
+                        break
                         
                 except Exception as e:
                     if progress_callback: progress_callback(f"Error reading {os.path.basename(f_path)}: {e}")
@@ -315,18 +343,17 @@ class ShortsProcessor:
                     progress_callback(f"No more valid combinations found.")
                 break
             
-            # Check if batch meets minimum duration requirement
+            # Check if batch meets minimum requirement
             # Accept batches that are at least 30 seconds OR 40% of target (whichever is lower)
             min_required = min(30, target_duration * 0.4)
-            duration_mode = settings.get('duration_mode', 'min')
             
             if current_duration < min_required or len(current_batch_files) < min_videos:
                 if progress_callback: 
-                    reason = f"only {current_duration:.1f}s (need at least {min_required:.0f}s)"
+                    reason = f"only {current_duration:.1f}s (need {min_required:.0f}s)"
                     if len(current_batch_files) < min_videos:
-                        reason = f"only {len(current_batch_files)} videos (requires at least {min_videos} videos)"
-                    progress_callback(f"Last batch failed: {reason}. Skipping first video and retrying.")
-                # We discard the first video of the failed combination and retry to build new combinations
+                        reason = f"only {len(current_batch_files)} videos (requires {min_videos})"
+                    progress_callback(f"Last batch failed: {reason}. Skipping first video.")
+                # Discard first video and return others to pool
                 first_failed = current_batch_files.pop(0)
                 discarded_videos.append(first_failed)
                 video_pool.extend(current_batch_files)
@@ -348,34 +375,38 @@ class ShortsProcessor:
             
             batch_idx += 1
         
-        # Add back any combinations that failed completely to be transferred to unused
+        # Move all unused videos
         video_pool.extend(discarded_videos)
-        
-        # After processing, move unused videos to subfolder
-        if video_pool and progress_callback:
-            import shutil
-            unused_count = len(video_pool)
+        if video_pool:
+            self._move_to_unused(source_folder, video_pool, progress_callback)
+
+    def _move_to_unused(self, source_folder, video_pool, progress_callback):
+        """Helper to move videos to unused category"""
+        import shutil
+        unused_count = len(video_pool)
+        if progress_callback:
             progress_callback(f"📦 Moving {unused_count} unused video(s) to 'unused_videos' folder...")
-            
-            # Create unused_videos folder in source directory
-            unused_folder = os.path.join(source_folder, "unused_videos")
-            if not os.path.exists(unused_folder):
-                os.makedirs(unused_folder)
-            
-            # Move each unused video
-            for video_path in video_pool:
-                try:
-                    video_name = os.path.basename(video_path)
-                    dest_path = os.path.join(unused_folder, video_name)
-                    shutil.move(video_path, dest_path)
-                    if progress_callback:
-                        progress_callback(f"  → Moved: {video_name}")
-                except Exception as e:
-                    if progress_callback:
-                        progress_callback(f"  ⚠️ Failed to move {os.path.basename(video_path)}: {e}")
-            
-            if progress_callback:
-                progress_callback(f"✅ Moved {unused_count} unused video(s) to: {unused_folder}")
+        
+        unused_folder = os.path.join(source_folder, "unused_videos")
+        if not os.path.exists(unused_folder):
+            os.makedirs(unused_folder)
+        
+        for video_path in video_pool:
+            try:
+                video_name = os.path.basename(video_path)
+                dest_path = os.path.join(unused_folder, video_name)
+                # Check if dest exists to avoid error
+                if os.path.exists(dest_path):
+                    os.remove(dest_path)
+                shutil.move(video_path, dest_path)
+                if progress_callback:
+                    progress_callback(f"  → Moved: {video_name}")
+            except Exception as e:
+                if progress_callback:
+                    progress_callback(f"  ⚠️ Failed to move {os.path.basename(video_path)}: {e}")
+        
+        if progress_callback:
+            progress_callback(f"✅ Moved {unused_count} unused video(s) to: {unused_folder}")
 
     def get_ffmpeg_binary(self):
         """

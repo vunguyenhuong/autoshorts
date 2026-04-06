@@ -316,8 +316,18 @@ class EditorTab(QWidget):
         self.min_videos_spin.setRange(1, 100)
         self.min_videos_spin.setValue(2) # Default at least 2
         self.min_videos_spin.setToolTip("Số video tối thiểu cần ghép trong 1 clip")
+        self.min_videos_spin.valueChanged.connect(self.update_estimation_debounced)
         min_videos_layout.addWidget(self.min_videos_spin)
         param_layout.addLayout(min_videos_layout)
+        
+        # Only under 1 min filter
+        only_under_1min_layout = QVBoxLayout()
+        only_under_1min_layout.addWidget(QLabel("Lọc Đầu Vào"))
+        self.only_under_1min_checkbox = QCheckBox("Chỉ lấy video < 1p")
+        self.only_under_1min_checkbox.stateChanged.connect(self.update_estimation_debounced)
+        self.only_under_1min_checkbox.setToolTip("Loại bỏ các video gốc dài trên 1 phút khỏi danh sách ghép")
+        only_under_1min_layout.addWidget(self.only_under_1min_checkbox)
+        param_layout.addLayout(only_under_1min_layout)
         
         # Target Duration
         duration_layout = QVBoxLayout()
@@ -589,7 +599,8 @@ class EditorTab(QWidget):
             'workers': self.workers_spin.value(),
             'hflip': getattr(self, 'hflip_checkbox', None) and self.hflip_checkbox.isChecked(),
             'random_color': getattr(self, 'random_color_checkbox', None) and self.random_color_checkbox.isChecked(),
-            'film_grain': getattr(self, 'film_grain_checkbox', None) and self.film_grain_checkbox.isChecked()
+            'film_grain': getattr(self, 'film_grain_checkbox', None) and self.film_grain_checkbox.isChecked(),
+            'only_under_1min': self.only_under_1min_checkbox.isChecked()
         }
 
     def update_estimation_debounced(self):
