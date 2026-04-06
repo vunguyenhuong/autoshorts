@@ -11,7 +11,7 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 import textwrap
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QTimeEdit
-from PyQt6.QtCore import QThread, pyqtSignal, QTime
+from PyQt6.QtCore import QThread, pyqtSignal, QTime, Qt
 from PyQt6.QtGui import QFont as QFont_GUI
 from datetime import datetime
 
@@ -39,7 +39,9 @@ def run_ffmpeg_silent(cmd):
             result = subprocess.run(
                 cmd, 
                 capture_output=True, 
-                text=True, 
+                text=True,
+                encoding='utf-8',
+                errors='replace',
                 startupinfo=startupinfo,
                 creationflags=subprocess.CREATE_NO_WINDOW
             )
@@ -47,11 +49,13 @@ def run_ffmpeg_silent(cmd):
             result = subprocess.run(
                 cmd, 
                 capture_output=True, 
-                text=True
+                text=True,
+                encoding='utf-8',
+                errors='replace'
             )
         return result
     except Exception as e:
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        result = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='replace')
         return result
 
 
@@ -97,12 +101,18 @@ class SkipRangeWidget(QWidget):
     
     def setup_ui(self):
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setContentsMargins(6, 4, 6, 4)
         layout.setSpacing(8)
+        
+        self.setStyleSheet("""
+            QWidget { background-color: #f8fafc; border-radius: 4px; border: 1px solid #e2e8f0; }
+            QLabel { border: none; font-size: 11px; color: #475569; }
+            QTimeEdit { border: 1px solid #cbd5e1; border-radius: 4px; padding: 2px; font-size: 11px; background-color: white; }
+        """)
         
         # Label showing index
         label = QLabel(f"Đoạn {self.index + 1}:")
-        label.setStyleSheet("font-weight: bold; min-width: 60px;")
+        label.setStyleSheet("font-weight: 600; color: #334155; min-width: 45px;")
         layout.addWidget(label)
         
         # From
@@ -110,7 +120,7 @@ class SkipRangeWidget(QWidget):
         self.start_time = QTimeEdit()
         self.start_time.setDisplayFormat("HH:mm:ss")
         self.start_time.setTime(QTime(0, 0, 0))
-        self.start_time.setMinimumWidth(80)
+        self.start_time.setFixedWidth(70)
         layout.addWidget(self.start_time)
         
         # To
@@ -118,31 +128,29 @@ class SkipRangeWidget(QWidget):
         self.end_time = QTimeEdit()
         self.end_time.setDisplayFormat("HH:mm:ss")
         self.end_time.setTime(QTime(0, 0, 30))
-        self.end_time.setMinimumWidth(80)
+        self.end_time.setFixedWidth(70)
         layout.addWidget(self.end_time)
         
+        layout.addStretch()
+        
         # Remove button
-        remove_btn = QPushButton("❌")
+        remove_btn = QPushButton("✕")
+        remove_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         remove_btn.setStyleSheet("""
             QPushButton {
                 background-color: transparent;
-                color: white;
+                color: #ef4444;
                 border: none;
-                padding: 3px;
-                border-radius: 3px;
-                min-width: 25px;
-                max-width: 25px;
-                min-height: 25px;
-                max-height: 25px;
+                border-radius: 4px;
+                font-weight: bold;
+                font-size: 14px;
+                min-width: 22px; max-width: 22px;
+                min-height: 22px; max-height: 22px;
             }
-            QPushButton:hover {
-                background-color: #c0392b;
-            }
+            QPushButton:hover { background-color: #fee2e2; }
         """)
         remove_btn.clicked.connect(self.remove_self)
         layout.addWidget(remove_btn)
-        
-        layout.addStretch()
     
     def remove_self(self):
         self.removed.emit(self)
@@ -503,7 +511,12 @@ class VideoProcessThread(QThread):
                     self.create_overlay_image(full_title, part_overlay, segment_title_path)
                     
                     date_str = datetime.now().strftime("%d%m%y")
-                    output_file = os.path.join(self.output_dir, f"{date_str}{segment_num:02d}.mp4")
+                    base_name = f"{date_str}{segment_num:02d}"
+                    output_file = os.path.join(self.output_dir, f"{base_name}.mp4")
+                    counter = 1
+                    while os.path.exists(output_file):
+                        output_file = os.path.join(self.output_dir, f"{base_name}{counter}.mp4")
+                        counter += 1
                     
                     self.create_segment_from_ranges(
                         time_ranges, 
@@ -523,7 +536,12 @@ class VideoProcessThread(QThread):
                 self.progress.emit("🎥 Đang xử lý video toàn bộ...")
                 
                 date_str = datetime.now().strftime("%d%m%y")
-                output_file = os.path.join(self.output_dir, f"{date_str}.mp4")
+                base_name = f"{date_str}"
+                output_file = os.path.join(self.output_dir, f"{base_name}.mp4")
+                counter = 1
+                while os.path.exists(output_file):
+                    output_file = os.path.join(self.output_dir, f"{base_name}{counter}.mp4")
+                    counter += 1
                 
                 self.create_segment_from_ranges(
                     time_ranges,

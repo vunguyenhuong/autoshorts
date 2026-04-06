@@ -102,6 +102,194 @@ class PreviewPopup(QWidget):
         self.move(x, y)
 
 
+class VideoItemWidget(QFrame):
+    preview_requested = pyqtSignal(str, float)
+    title_changed = pyqtSignal()
+
+    def __init__(self, path, original_duration, parent=None):
+        super().__init__(parent)
+        self.path = path
+        self.duration = original_duration
+        self.skip_widgets = []
+        self.setup_ui()
+    
+    def setup_ui(self):
+        self.setFrameShape(QFrame.Shape.NoFrame)
+        self.setStyleSheet("""
+            VideoItemWidget { 
+                background-color: #ffffff; 
+                border: 1px solid #e2e8f0; 
+                border-radius: 8px; 
+                margin-bottom: 8px; 
+            }
+        """)
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(16, 16, 16, 16)
+        main_layout.setSpacing(12)
+
+        # Header: Path and Preview
+        header_layout = QHBoxLayout()
+        header_layout.setContentsMargins(0, 0, 0, 0)
+        
+        path_label = QLabel(f"📄 .../{Path(self.path).name}")
+        path_label.setToolTip(self.path)
+        path_label.setStyleSheet("color: #64748b; font-size: 11px; border: none; background: transparent; font-weight: 500;")
+        header_layout.addWidget(path_label, stretch=1)
+        
+        preview_btn = QPushButton("👁 Preview")
+        preview_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        preview_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #f1f5f9; 
+                color: #0f172a; 
+                border: 1px solid #cbd5e1; 
+                border-radius: 4px; 
+                padding: 4px 12px; 
+                font-weight: 600;
+                font-size: 11px;
+            }
+            QPushButton:hover { background-color: #e2e8f0; }
+        """)
+        preview_btn.clicked.connect(lambda: self.preview_requested.emit(self.path, self.duration))
+        header_layout.addWidget(preview_btn)
+        
+        main_layout.addLayout(header_layout)
+
+        # Title Input
+        title_layout = QHBoxLayout()
+        title_label = QLabel("Tiêu đề:")
+        title_label.setStyleSheet("color: #334155; font-weight: 600; font-size: 12px; border: none;")
+        title_label.setFixedWidth(55)
+        title_layout.addWidget(title_label)
+
+        stem = Path(self.path).stem
+        self.title_input = QLineEdit()
+        self.title_input.setText(stem)
+        self.title_input.textChanged.connect(lambda: self.title_changed.emit())
+        self.title_input.setStyleSheet("""
+            QLineEdit {
+                border: 1px solid #cbd5e1;
+                border-radius: 4px;
+                background-color: #fafafa;
+                padding: 6px 10px;
+                color: #0f172a;
+                font-size: 13px;
+                font-weight: 500;
+            }
+            QLineEdit:focus {
+                border: 1px solid #3b82f6;
+                background-color: #ffffff;
+            }
+        """)
+        title_layout.addWidget(self.title_input)
+        main_layout.addLayout(title_layout)
+
+        # Cut range
+        cut_layout = QHBoxLayout()
+        cut_layout.setContentsMargins(0, 0, 0, 0)
+        
+        cut_icon = QLabel("✂ Khoảng cắt:")
+        cut_icon.setStyleSheet("color: #334155; font-weight: 600; font-size: 12px; border: none;")
+        cut_icon.setFixedWidth(90)
+        cut_layout.addWidget(cut_icon)
+        
+        self.cut_start = QTimeEdit()
+        self.cut_start.setDisplayFormat("HH:mm:ss")
+        self.cut_start.setTime(QTime(0, 0, 0))
+        self.cut_start.setFixedWidth(80)
+        self.cut_start.setStyleSheet("QTimeEdit { border: 1px solid #cbd5e1; border-radius: 4px; padding: 3px; background-color: white; }")
+        cut_layout.addWidget(self.cut_start)
+
+        to_label = QLabel(" đến ")
+        to_label.setStyleSheet("color: #64748b; font-size: 12px; border: none;")
+        cut_layout.addWidget(to_label)
+
+        self.cut_end = QTimeEdit()
+        self.cut_end.setDisplayFormat("HH:mm:ss")
+        h = int(self.duration // 3600)
+        m = int((self.duration % 3600) // 60)
+        s = int(self.duration % 60)
+        self.cut_end.setTime(QTime(h, m, s))
+        self.cut_end.setFixedWidth(80)
+        self.cut_end.setStyleSheet("QTimeEdit { border: 1px solid #cbd5e1; border-radius: 4px; padding: 3px; background-color: white; }")
+        cut_layout.addWidget(self.cut_end)
+        
+        cut_layout.addStretch() # Prevents stretching
+        main_layout.addLayout(cut_layout)
+
+        # Skip range separator/header
+        skip_header_layout = QHBoxLayout()
+        skip_header_layout.setContentsMargins(0, 4, 0, 0)
+        
+        skip_label = QLabel("⏭ Bỏ qua đoạn:")
+        skip_label.setStyleSheet("color: #334155; font-weight: 600; font-size: 12px; border: none;")
+        skip_header_layout.addWidget(skip_label)
+
+        add_skip_btn = QPushButton("+ Thêm khoảng")
+        add_skip_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        add_skip_btn.setStyleSheet("""
+            QPushButton {
+                background-color: transparent; 
+                color: #3b82f6; 
+                border: 1px dashed #3b82f6; 
+                border-radius: 4px; 
+                padding: 3px 8px; 
+                font-weight: 600;
+                font-size: 11px;
+            }
+            QPushButton:hover { background-color: #eff6ff; }
+        """)
+        add_skip_btn.clicked.connect(self.add_skip_range)
+        skip_header_layout.addWidget(add_skip_btn)
+        skip_header_layout.addStretch()
+        main_layout.addLayout(skip_header_layout)
+
+        # Skip container (No heavy borders)
+        self.skip_container_widget = QWidget()
+        self.skip_container_widget.setStyleSheet("background: transparent; border: none;")
+        self.skip_container = QVBoxLayout(self.skip_container_widget)
+        self.skip_container.setSpacing(4)
+        self.skip_container.setContentsMargins(0, 0, 0, 0)
+
+        self.skip_placeholder = QLabel("Chưa có đoạn bỏ qua nào")
+        self.skip_placeholder.setStyleSheet("color: #94a3b8; font-style: italic; font-size: 11px; padding: 4px 0;")
+        self.skip_container.addWidget(self.skip_placeholder)
+
+        main_layout.addWidget(self.skip_container_widget)
+
+    def add_skip_range(self):
+        self.skip_placeholder.setVisible(False)
+        skip_widget = SkipRangeWidget(len(self.skip_widgets))
+        skip_widget.removed.connect(self.remove_skip_range)
+        self.skip_container.addWidget(skip_widget)
+        self.skip_widgets.append(skip_widget)
+        
+    def remove_skip_range(self, widget):
+        self.skip_container.removeWidget(widget)
+        self.skip_widgets.remove(widget)
+        widget.deleteLater()
+        for i, w in enumerate(self.skip_widgets):
+            w.index = i
+            w.findChild(QLabel).setText(f"Đoạn {i + 1}:")
+        if not self.skip_widgets:
+            self.skip_placeholder.setVisible(True)
+
+    def get_skip_ranges(self):
+        ranges = []
+        for w in self.skip_widgets:
+            start, end = w.get_times()
+            if start < end:
+                ranges.append((start, end))
+        ranges.sort(key=lambda x: x[0])
+        return ranges
+
+    def get_cut_times(self):
+        def time_to_sec(qtime):
+            return qtime.hour() * 3600 + qtime.minute() * 60 + qtime.second()
+        return time_to_sec(self.cut_start.time()), time_to_sec(self.cut_end.time())
+
+
+
 
 
 class AutoCutTab(QWidget):
@@ -128,6 +316,11 @@ class AutoCutTab(QWidget):
         self.original_video_width = None
         self.original_video_height = None
         self.current_preview_pixmap = None  # Store current preview for popup
+        
+        # Timer cho debounce preview khi gõ tiêu đề
+        self.preview_timer = QTimer()
+        self.preview_timer.setSingleShot(True)
+        self.preview_timer.timeout.connect(self.update_preview)
 
         # Subtitle variables (UI is currently hidden/overwritten)
         self.enable_subtitles = False
@@ -138,6 +331,13 @@ class AutoCutTab(QWidget):
         self.subtitle_color = (255, 255, 255)
         self.subtitle_bg_color = (0, 0, 0, 150)
         self.current_srt_file = None
+
+        # Batch Processing Variables
+        self.processing_mode = "single"  # 'single' or 'batch'
+        self.video_queue = []
+        self.current_queue_index = 0
+        self.total_queue_size = 0
+        self.current_processing_video = None
 
         # Setup UI
         self.setup_ui()
@@ -225,19 +425,35 @@ class AutoCutTab(QWidget):
         file_group = self.create_file_group()
         layout.addWidget(file_group)
 
-        # Time settings
-        time_group = self.create_time_group()
-        layout.addWidget(time_group)
-
-        # Skip ranges settings
-        skip_group = self.create_skip_group()
-        layout.addWidget(skip_group)
+        # Danh sách cấu hình video (Thay thế time settings và skip ranges)
+        self.video_list_group = QGroupBox("Danh sách cấu hình Video")
+        video_list_layout = QVBoxLayout(self.video_list_group)
+        
+        self.video_scroll_area = QScrollArea()
+        self.video_scroll_area.setWidgetResizable(True)
+        self.video_scroll_area.setMinimumHeight(350)
+        self.video_scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        
+        self.video_items_container = QWidget()
+        self.video_items_layout = QVBoxLayout(self.video_items_container)
+        self.video_items_layout.setSpacing(5)
+        self.video_items_layout.setContentsMargins(5, 5, 5, 5)
+        
+        self.empty_video_label = QLabel("Chưa có video nào. Hãy chọn thư mục hoặc video nguồn.")
+        self.empty_video_label.setStyleSheet("color: #7f8c8d; font-style: italic; padding: 20px;")
+        self.empty_video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.video_items_layout.addWidget(self.empty_video_label)
+        self.video_items_layout.addStretch()
+        
+        self.video_scroll_area.setWidget(self.video_items_container)
+        video_list_layout.addWidget(self.video_scroll_area)
+        
+        layout.addWidget(self.video_list_group, stretch=1)
 
         # Processing settings
         settings_group = self.create_settings_group()
         layout.addWidget(settings_group)
 
-        layout.addStretch()
         return panel
 
     def create_right_panel(self):
@@ -263,6 +479,13 @@ class AutoCutTab(QWidget):
         layout.setSpacing(8)
         layout.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
 
+        # Chế độ xử lý
+        self.mode_combo = QComboBox()
+        self.mode_combo.addItem("Xử lý 1 Video đơn lẻ", "single")
+        self.mode_combo.addItem("Xử lý Hàng loạt (Thư mục)", "batch")
+        self.mode_combo.currentIndexChanged.connect(self.update_processing_mode)
+        layout.addRow("Chế độ:", self.mode_combo)
+
         # Video input
         video_widget = QWidget()
         video_layout = QHBoxLayout(video_widget)
@@ -278,7 +501,7 @@ class AutoCutTab(QWidget):
         video_btn.clicked.connect(self.select_video)
         video_layout.addWidget(video_btn, 1)
 
-        layout.addRow("Video nguồn:", video_widget)
+        layout.addRow("Nguồn:", video_widget)
 
         # Output directory
         output_widget = QWidget()
@@ -295,13 +518,7 @@ class AutoCutTab(QWidget):
         output_btn.clicked.connect(self.select_output)
         output_layout.addWidget(output_btn, 1)
 
-        layout.addRow("Thư mục xuất:", output_widget)
-
-        # Title
-        self.title_input = QLineEdit()
-        self.title_input.setPlaceholderText("Nhập tiêu đề video...")
-        self.title_input.textChanged.connect(self.update_preview_debounced)
-        layout.addRow("Tiêu đề:", self.title_input)
+        layout.addRow("Xuất:", output_widget)
 
         # Title Y position
         self.title_y_input = QSpinBox()
@@ -310,89 +527,6 @@ class AutoCutTab(QWidget):
         self.title_y_input.setSuffix(" px")
         self.title_y_input.valueChanged.connect(self.update_preview_debounced)
         layout.addRow("Vị trí Tiêu đề (Y):", self.title_y_input)
-
-        # Video info
-        self.video_info = QLabel("Chưa chọn video")
-        self.video_info.setStyleSheet("color: #7f8c8d; font-style: italic; font-size: 8pt;")
-        layout.addRow("Thông tin:", self.video_info)
-
-        group.setLayout(layout)
-        return group
-
-    def create_time_group(self):
-        group = QGroupBox("")
-        layout = QGridLayout()
-        layout.setSpacing(8)
-        layout.setContentsMargins(10, 15, 10, 10)
-
-        # Cut range
-        cut_label = QLabel("Khoảng cắt (video gốc):")
-        cut_label.setStyleSheet("font-weight: bold; color: #2c3e50;")
-        layout.addWidget(cut_label, 0, 0, 1, 4)
-
-        layout.addWidget(QLabel("Từ:"), 1, 0)
-        self.cut_start = QTimeEdit()
-        self.cut_start.setDisplayFormat("HH:mm:ss")
-        self.cut_start.setTime(QTime(0, 0, 0))
-        self.cut_start.timeChanged.connect(self.update_duration_display)
-        layout.addWidget(self.cut_start, 1, 1)
-
-        layout.addWidget(QLabel("đến"), 1, 2)
-        self.cut_end = QTimeEdit()
-        self.cut_end.setDisplayFormat("HH:mm:ss")
-        self.cut_end.setTime(QTime(0, 1, 0))
-        self.cut_end.timeChanged.connect(self.update_duration_display)
-        layout.addWidget(self.cut_end, 1, 3)
-
-        group.setLayout(layout)
-        return group
-
-    def create_skip_group(self):
-        """Tạo group cho các khoảng bỏ qua"""
-        group = QGroupBox("")
-        layout = QVBoxLayout()
-        layout.setSpacing(10)
-        layout.setContentsMargins(10, 15, 10, 10)
-
-        # Header với nút thêm
-        header_widget = QWidget()
-        header_layout = QHBoxLayout(header_widget)
-        header_layout.setContentsMargins(0, 0, 0, 0)
-
-        skip_label = QLabel("Các đoạn bỏ qua (video gốc):")
-        skip_label.setStyleSheet("font-weight: bold; color: #2c3e50;")
-        header_layout.addWidget(skip_label)
-
-        self.add_skip_btn = QPushButton("+")
-        self.add_skip_btn.setObjectName("addSkipButton")
-        self.add_skip_btn.clicked.connect(self.add_skip_range)
-        header_layout.addWidget(self.add_skip_btn)
-
-        layout.addWidget(header_widget)
-
-        # Scroll area cho các khoảng bỏ qua
-        scroll_area = QScrollArea()
-        scroll_area.setWidgetResizable(True)
-        scroll_area.setMinimumHeight(350)
-        scroll_area.setMaximumHeight(600)
-        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-
-        # Container widget cho scroll area
-        container_widget = QWidget()
-        container_widget.setObjectName("skipContainer")
-        self.skip_container_layout = QVBoxLayout(container_widget)
-        self.skip_container_layout.setSpacing(5)
-        self.skip_container_layout.setContentsMargins(5, 5, 5, 5)
-
-        # Thêm một placeholder label khi chưa có skip nào
-        self.skip_placeholder = QLabel("Chưa có đoạn bỏ qua nào. Nhấn nút 'Thêm đoạn bỏ qua' để thêm.")
-        self.skip_placeholder.setStyleSheet("color: #7f8c8d; font-style: italic; padding: 10px;")
-        self.skip_placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.skip_container_layout.addWidget(self.skip_placeholder)
-        self.skip_container_layout.addStretch()
-
-        scroll_area.setWidget(container_widget)
-        layout.addWidget(scroll_area)
 
         group.setLayout(layout)
         return group
@@ -1319,6 +1453,11 @@ class AutoCutTab(QWidget):
                 self.font_combo.addItem(font_file.stem, str(font_file))
             for font_file in fonts_dir.glob("*.otf"):
                 self.font_combo.addItem(font_file.stem, str(font_file))
+        
+        # Set Oswald-Medium as default
+        index = self.font_combo.findText("Oswald-Medium")
+        if index >= 0:
+            self.font_combo.setCurrentIndex(index)
 
     def time_to_seconds(self, qtime):
         return qtime.hour() * 3600 + qtime.minute() * 60 + qtime.second()
@@ -1335,108 +1474,35 @@ class AutoCutTab(QWidget):
         secs = int(seconds % 60)
         return f"{hours:02d}:{minutes:02d}:{secs:02d}"
 
-    def add_skip_range(self):
-        """Thêm một widget bỏ qua mới"""
-        # Ẩn placeholder nếu đây là widget đầu tiên
-        if len(self.skip_widgets) == 0:
-            self.skip_placeholder.setVisible(False)
-
-        # Tạo widget mới
-        skip_widget = SkipRangeWidget(len(self.skip_widgets))
-        skip_widget.removed.connect(self.remove_skip_range)
-
-        # Thêm vào layout (trước stretch)
-        self.skip_container_layout.insertWidget(len(self.skip_widgets), skip_widget)
-        self.skip_widgets.append(skip_widget)
-
-        # Cập nhật số lượng
-        self.skip_count.setText(str(len(self.skip_widgets)))
-
-        # Kết nối sự kiện thay đổi thời gian
-        skip_widget.start_time.timeChanged.connect(self.update_duration_display)
-        skip_widget.end_time.timeChanged.connect(self.update_duration_display)
-
-        # Cập nhật hiển thị thời gian
-        self.update_duration_display()
-
-        self.log(f"➕ Đã thêm đoạn bỏ qua thứ {len(self.skip_widgets)}")
-
-    def remove_skip_range(self, widget):
-        """Xóa một widget bỏ qua"""
-        if widget in self.skip_widgets:
-            # Xóa khỏi layout
-            self.skip_container_layout.removeWidget(widget)
-
-            # Xóa khỏi danh sách
-            self.skip_widgets.remove(widget)
-
-            # Xóa widget
-            widget.deleteLater()
-
-            # Cập nhật chỉ số cho các widget còn lại
-            for i, w in enumerate(self.skip_widgets):
-                # Cập nhật label hiển thị số thứ tự
-                w.findChild(QLabel).setText(f"Đoạn {i + 1}:")
-                w.index = i
-
-            # Hiển thị placeholder nếu không còn widget nào
-            if len(self.skip_widgets) == 0:
-                self.skip_placeholder.setVisible(True)
-
-            # Cập nhật số lượng
-            self.skip_count.setText(str(len(self.skip_widgets)))
-
-            # Cập nhật hiển thị thời gian
-            self.update_duration_display()
-
-            self.log(f"➖ Đã xóa đoạn bỏ qua")
-
-    def get_skip_ranges(self):
-        """Lấy danh sách tất cả các khoảng bỏ qua"""
-        skip_ranges = []
-        for widget in self.skip_widgets:
-            start, end = widget.get_times()
-            if start < end:  # Chỉ thêm nếu khoảng hợp lệ
-                skip_ranges.append((start, end))
-
-        # Sắp xếp theo thời gian bắt đầu
-        skip_ranges.sort(key=lambda x: x[0])
-        return skip_ranges
-
     def calculate_work_duration(self):
-        """Tính thời gian làm việc thực tế (đã loại bỏ tất cả skip ranges)"""
-        start_sec = self.time_to_seconds(self.cut_start.time())
-        end_sec = self.time_to_seconds(self.cut_end.time())
+        """Tính thời gian làm việc thực tế cho Video hiển thị chung"""
+        if not hasattr(self, 'video_item_widgets') or len(self.video_item_widgets) == 0:
+            return 0
+            
+        widget = self.video_item_widgets[0]
+        try:
+            start_sec, end_sec = widget.get_cut_times()
+            skip_ranges = widget.get_skip_ranges()
+        except:
+            return 0
 
         total_duration = max(0, end_sec - start_sec)
-
-        # Lấy danh sách skip ranges
-        skip_ranges = self.get_skip_ranges()
-
-        # Sắp xếp skip ranges theo thời gian bắt đầu
         skip_ranges.sort(key=lambda x: x[0])
 
-        # Loại bỏ tất cả các skip ranges
         current_start = start_sec
         current_end = end_sec
 
         for skip_start, skip_end in skip_ranges:
-            # Chỉ xét skip range nằm trong phạm vi video
             if skip_end <= current_start or skip_start >= current_end:
                 continue
 
-            # Phần skip thực sự nằm trong khoảng hiện tại
             effective_skip_start = max(skip_start, current_start)
             effective_skip_end = min(skip_end, current_end)
 
             if effective_skip_start > current_start:
-                # Khoảng trước skip đã được tính trong total_duration
-                # Chỉ cần trừ đi phần skip
                 total_duration -= (effective_skip_end - effective_skip_start)
 
-            # Cập nhật current_start để tiếp tục tính toán
             current_start = effective_skip_end
-
             if current_start >= current_end:
                 break
 
@@ -1601,8 +1667,16 @@ class AutoCutTab(QWidget):
                     overlay_opacity=self.overlay_opacity
                 )
 
+                # Lấy title từ Box video hiện hành
+                current_preview_title = Path(self.current_video_path).stem
+                if hasattr(self, 'video_item_widgets'):
+                    for w in self.video_item_widgets:
+                        if w.path == self.current_video_path:
+                            current_preview_title = w.title_input.text()
+                            break
+
                 part_text = f"{self.part_suffix.text()} 1" if self.show_part_checkbox.isChecked() else ""
-                dummy_thread.create_overlay_image(self.title_input.text(), part_text, temp_overlay)
+                dummy_thread.create_overlay_image(current_preview_title, part_text, temp_overlay)
 
                 # Thêm lớp màu overlay nếu có opacity > 0
                 if self.overlay_opacity > 0:
@@ -1772,69 +1846,136 @@ class AutoCutTab(QWidget):
                 padding: 3px 8px;
             """)
 
-    def select_video(self):
-        filename, _ = QFileDialog.getOpenFileName(
-            self,
-            "Chọn video",
-            "",
-            "Video Files (*.mp4 *.avi *.mov *.mkv *.webm);;All Files (*)"
-        )
-        if filename:
-            self.current_video_path = filename
-            self.video_input.setText(filename)
-            self.log(f"📂 Đã chọn video: {Path(filename).name}")
+    def update_processing_mode(self):
+        mode = self.mode_combo.currentData()
+        self.processing_mode = mode
+        if mode == "single":
+            self.video_input.setPlaceholderText("Chọn video...")
+        else:
+            self.video_input.setPlaceholderText("Chọn thư mục chứa video...")
+            
+        self.video_input.setText("")
+        self.current_video_path = None
+        
+        # Xóa các widget cũ
+        if hasattr(self, 'video_item_widgets'):
+            for w in self.video_item_widgets:
+                self.video_items_layout.removeWidget(w)
+                w.deleteLater()
+            self.video_item_widgets.clear()
+        
+        self.empty_video_label.setText("Chưa có video nào. Hãy chọn " + ("video" if mode == "single" else "thư mục") + " nguồn.")
+        self.empty_video_label.setVisible(True)
+        self.update_preview()
 
-            # Get video duration
+    def select_video(self):
+        if self.processing_mode == "single":
+            filename, _ = QFileDialog.getOpenFileName(
+                self,
+                "Chọn video",
+                "",
+                "Video Files (*.mp4 *.avi *.mov *.mkv *.webm);;All Files (*)"
+            )
+            if filename:
+                self.process_selected_input(filename, is_dir=False)
+        else:
+            dirname = QFileDialog.getExistingDirectory(self, "Chọn thư mục chứa video")
+            if dirname:
+                self.process_selected_input(dirname, is_dir=True)
+
+    def process_selected_input(self, path, is_dir=False):
+        # Kiểm tra thuộc tính list
+        if not hasattr(self, 'video_item_widgets'):
+            self.video_item_widgets = []
+            
+        # Xóa các widget cũ
+        for w in self.video_item_widgets:
+            self.video_items_layout.removeWidget(w)
+            w.deleteLater()
+        self.video_item_widgets.clear()
+        self.empty_video_label.setVisible(False)
+
+        videos_to_process = []
+
+        if not is_dir:
+            self.current_video_path = path
+            self.video_input.setText(path)
+            self.log(f"📂 Đã chọn video: {Path(path).name}")
+            videos_to_process.append(path)
+        else:
+            self.video_input.setText(path)
+            self.log(f"📂 Đã chọn thư mục: {path}")
+            
+            video_extensions = ('.mp4', '.avi', '.mov', '.mkv', '.webm', '.MP4', '.AVI', '.MOV')
+            for root, dirs, files in os.walk(path):
+                for file in files:
+                    if file.lower().endswith(video_extensions):
+                        videos_to_process.append(os.path.join(root, file))
+            
+            if videos_to_process:
+                self.current_video_path = videos_to_process[0]
+                self.log(f"Tìm thấy {len(videos_to_process)} video trong thư mục.")
+            else:
+                self.log(f"❌ Không tìm thấy video nào trong thư mục!")
+                self.empty_video_label.setText("Không tìm thấy video nào trong thư mục.")
+                self.empty_video_label.setVisible(True)
+                self.current_video_path = None
+                return
+
+        # Tạo widget cho mỗi video
+        for video_path in videos_to_process:
             try:
                 cmd = [
-                    FFPROBE_EXE,
-                    '-v', 'error',
-                    '-show_entries', 'format=duration',
-                    '-of', 'default=noprint_wrappers=1:nokey=1',
-                    filename
+                    FFPROBE_EXE, '-v', 'error', '-show_entries', 'format=duration',
+                    '-of', 'default=noprint_wrappers=1:nokey=1', video_path
                 ]
                 result = run_ffmpeg_silent(cmd)
-                self.video_duration = float(result.stdout.strip())
-                
-                # Cập nhật cut_end với thời lượng video gốc
-                self.cut_end.setTime(self.seconds_to_qtime(self.video_duration))
-                
-                duration_text = self.format_time(self.video_duration)
-                
-                # Lấy kích thước video
-                try:
-                    cmd_size = [
-                        FFPROBE_EXE,
-                        '-v', 'error',
-                        '-select_streams', 'v:0',
-                        '-show_entries', 'stream=width,height',
-                        '-of', 'csv=p=0',
-                        filename
-                    ]
-                    result_size = run_ffmpeg_silent(cmd_size)
-                    video_width, video_height = map(int, result_size.stdout.strip().split(','))
-                    self.original_video_width = video_width
-                    self.original_video_height = video_height
-                    size_text = f"{video_width}x{video_height}"
-                except:
-                    size_text = "Unknown"
-                
-                file_size = os.path.getsize(filename) / (1024 * 1024)  # MB
-                
-                self.video_info.setText(f"{duration_text} • {size_text} • {file_size:.1f}MB")
-                self.log(f"Thời lượng: {duration_text}")
-                self.log(f"Kích thước video: {size_text}")
-                self.log(f"Dung lượng: {file_size:.1f} MB")
-                
-                # Cập nhật hiển thị thời gian
-                self.update_duration_display()
-                
-                # Cập nhật preview
-                self.update_preview()
-                
+                duration = float(result.stdout.strip())
             except Exception as e:
-                self.log(f"Không thể đọc video: {str(e)}")
-                self.video_duration = 0
+                self.log(f"Lỗi khi đọc file {Path(video_path).name}: {e}")
+                duration = 0.0
+                
+            item = VideoItemWidget(video_path, duration)
+            item.preview_requested.connect(self.load_preview_from_item)
+            item.title_changed.connect(self.on_title_changed)
+            
+            self.video_items_layout.insertWidget(self.video_items_layout.count() - 1, item)
+            self.video_item_widgets.append(item)
+            QApplication.processEvents()
+
+        # Tải preview cho video đầu tiên
+        if self.video_item_widgets:
+            first_item = self.video_item_widgets[0]
+            self.load_preview_from_item(first_item.path, first_item.duration)
+
+    def load_preview_from_item(self, path, duration):
+        """Thay đổi video preview khi người dùng ấn nút Preview trên item"""
+        self.current_video_path = path
+        self.video_duration = duration
+        self.log(f"👁 Chuyển sang Preview: {Path(path).name} ({self.format_time(duration)})")
+        
+        try:
+            cmd_size = [
+                FFPROBE_EXE, '-v', 'error', '-select_streams', 'v:0',
+                '-show_entries', 'stream=width,height', '-of', 'csv=p=0', path
+            ]
+            result_size = run_ffmpeg_silent(cmd_size)
+            w, h = map(int, result_size.stdout.strip().split(','))
+            self.original_video_width = w
+            self.original_video_height = h
+        except:
+            pass
+            
+        self.update_preview()
+            
+    def on_title_changed(self):
+        """Kích hoạt khi người dùng gõ tiêu đề ở bất kỳ video nào"""
+        if self.current_video_path:
+            # Chỉ update preview nếu video đang sửa tiêu đề khớp với video đang preview
+            # (Hoặc cứ update nếu muốn đơn giản, ở đây dùng timer để tránh lag)
+            self.preview_timer.start(700) # Đợi 0.7s sau khi ngừng gõ mới render lại preview
+            
+
     
     def select_output(self):
         dirname = QFileDialog.getExistingDirectory(self, "Chọn thư mục xuất")
@@ -1850,9 +1991,9 @@ class AutoCutTab(QWidget):
         self.log_output.append(f"[{timestamp}] {message}")
     
     def start_processing(self):
-        if not self.video_input.text():
-            self.log("❌ Vui lòng chọn video đầu vào!")
-            self.status_display.setText("🔴 Thiếu video")
+        if not hasattr(self, 'video_item_widgets') or not self.video_item_widgets:
+            self.log("❌ Vui lòng chọn " + ("video" if self.processing_mode == 'single' else "thư mục") + " đầu vào!")
+            self.status_display.setText("🔴 Thiếu đầu vào")
             self.status_display.setStyleSheet(self.status_display.styleSheet().replace("#27ae60", "#e74c3c").replace("#e8f6f3", "#fadbd8"))
             return
         
@@ -1861,22 +2002,57 @@ class AutoCutTab(QWidget):
             self.status_display.setText("🔴 Thiếu thư mục")
             self.status_display.setStyleSheet(self.status_display.styleSheet().replace("#27ae60", "#e74c3c").replace("#e8f6f3", "#fadbd8"))
             return
-        
-        if not self.title_input.text().strip():
-            self.log("❌ Vui lòng nhập tiêu đề!")
-            self.status_display.setText("🔴 Thiếu tiêu đề")
-            self.status_display.setStyleSheet(self.status_display.styleSheet().replace("#27ae60", "#e74c3c").replace("#e8f6f3", "#fadbd8"))
-            return
-        
-        # Kiểm tra xem có skip range nào không hợp lệ không
-        skip_ranges = self.get_skip_ranges()
-        for i, (start, end) in enumerate(skip_ranges):
-            if start >= end:
-                QMessageBox.warning(self, "Cảnh báo", 
-                    f"Đoạn bỏ qua thứ {i+1} không hợp lệ: thời gian bắt đầu phải nhỏ hơn thời gian kết thúc!")
+
+        # Prepare processing queue
+        self.video_queue = []
+        input_path = self.video_input.text()
+        out_base = self.output_input.text()
+
+        for widget in self.video_item_widgets:
+            src_file = widget.path
+            title = widget.title_input.text().strip()
+            if not title:
+                self.log(f"❌ Video {Path(src_file).name} thiếu tiêu đề!")
                 return
+            
+            # Lấy skip ranges từ widget
+            try:
+                skip_ranges = widget.get_skip_ranges()
+            except Exception as e:
+                self.log(f"❌ Lỗi skip range ở video {Path(src_file).name}")
+                return
+                
+            start_time, end_time = widget.get_cut_times()
+            
+            if self.processing_mode == "single":
+                dest_dir = out_base
+            else:
+                try:
+                    rel_path = os.path.relpath(os.path.dirname(src_file), input_path)
+                    if rel_path == '.':
+                        dest_dir = out_base
+                    else:
+                        dest_dir = os.path.join(out_base, rel_path)
+                except:
+                    dest_dir = out_base
+
+            self.video_queue.append({
+                "src_file": src_file,
+                "dest_dir": dest_dir,
+                "title": title,
+                "start_time": start_time,
+                "end_time": end_time,
+                "skip_ranges": skip_ranges
+            })
+
+        if not self.video_queue:
+            self.log("❌ Không tìm thấy video hợp lệ để xử lý!")
+            return
+
+        self.total_queue_size = len(self.video_queue)
+        self.current_queue_index = 0
         
-        # Prepare for processing
+        # Prepare UI for processing
         self.process_btn.setEnabled(False)
         self.process_btn.setText("⏳ ĐANG XỬ LÝ...")
         self.stop_btn.setEnabled(True)  # Kích hoạt nút Stop
@@ -1884,16 +2060,29 @@ class AutoCutTab(QWidget):
         self.status_display.setText("🟡 Đang xử lý...")
         self.status_display.setStyleSheet(self.status_display.styleSheet().replace("#27ae60", "#f39c12").replace("#e8f6f3", "#fef9e7").replace("#e74c3c", "#f39c12"))
         self.progress_label.setText("Đang chuẩn bị xử lý...")
+
+        self.process_next_in_queue()
+
+    def process_next_in_queue(self):
+        if self.current_queue_index >= self.total_queue_size:
+            self.all_processing_finished()
+            return
+
+        job = self.video_queue[self.current_queue_index]
+        src_file = job["src_file"]
+        dest_dir = job["dest_dir"]
+        current_title = job["title"]
+        start_time = job["start_time"]
+        end_time = job["end_time"]
+        skip_ranges = job["skip_ranges"]
         
+        self.current_processing_video = src_file
+        
+        self.log(f"▶️ Bắt đầu xử lý {self.current_queue_index + 1}/{self.total_queue_size}: {Path(src_file).name}")
+        self.progress_label.setText(f"Đang xử lý {self.current_queue_index + 1}/{self.total_queue_size}...")
+
         # Get all parameters
         font_path = self.font_combo.currentData()
-        
-        # Lấy thời gian THEO VIDEO GỐC (không điều chỉnh speed)
-        start_time = self.time_to_seconds(self.cut_start.time())
-        end_time = self.time_to_seconds(self.cut_end.time())
-        
-        # Lấy danh sách skip ranges
-        skip_ranges = self.get_skip_ranges()
         
         # Lấy tỉ lệ zoom
         width_scale = self.width_scale_input.value()
@@ -1954,7 +2143,7 @@ class AutoCutTab(QWidget):
                 QApplication.processEvents()
                 
                 transcription = self.subtitle_generator.transcribe_video(
-                    self.video_input.text(),
+                    src_file,
                     language=language_code,
                     use_cache=True,
                     progress_callback=progress_callback
@@ -1964,8 +2153,8 @@ class AutoCutTab(QWidget):
                 self.progress_label.setText("Đang tạo file phụ đề SRT...")
                 QApplication.processEvents()
                 
-                output_dir = os.path.dirname(self.video_input.text())
-                srt_filename = os.path.splitext(os.path.basename(self.video_input.text()))[0] + ".srt"
+                output_dir = os.path.dirname(src_file)
+                srt_filename = os.path.splitext(os.path.basename(src_file))[0] + ".srt"
                 srt_path = os.path.join(output_dir, srt_filename)
                 
                 self.subtitle_generator.generate_srt(transcription, srt_path)
@@ -2007,11 +2196,22 @@ class AutoCutTab(QWidget):
                     self.progress_label.setText("Đã hủy do lỗi tạo phụ đề")
                     return
         
+        # Determine original sizes for the current video to allow correct zoom (each video might have different dimensions)
+        try:
+            cmd_size = [
+                FFPROBE_EXE, '-v', 'error', '-select_streams', 'v:0',
+                '-show_entries', 'stream=width,height', '-of', 'csv=p=0', src_file
+            ]
+            result_size = run_ffmpeg_silent(cmd_size)
+            orig_w, orig_h = map(int, result_size.stdout.strip().split(','))
+        except:
+            orig_w, orig_h = self.original_video_width or 1080, self.original_video_height or 1920
+
         # Start processing thread với các tham số mới (bao gồm text border)
         self.thread = VideoProcessThread(
-            self.video_input.text(),
-            self.output_input.text(),
-            self.title_input.text().strip(),
+            src_file,
+            dest_dir,
+            current_title,
             self.speed_input.value(),
             self.segment_input.value(),
             self.gpu_checkbox.isChecked(),
@@ -2021,12 +2221,12 @@ class AutoCutTab(QWidget):
             self.text_color,
             font_path,
             start_time,    # Thời gian theo video gốc
-            end_time,      # Thời gian theo video gốc
+            end_time,      # Thời gian theo video gốc (Lưu ý: batch có thể bị lỗi nếu video ngắn hơn end_time)
             skip_ranges,   # Danh sách các khoảng bỏ qua
             width_scale,   # Tỉ lệ zoom chiều ngang
             height_scale,  # Tỉ lệ zoom chiều dọc
-            self.original_video_width,   # Kích thước video gốc
-            self.original_video_height,  # Kích thước video gốc
+            orig_w,        # Kích thước video gốc
+            orig_h,        # Kích thước video gốc
             text_border_color,  # Màu viền TEXT
             text_border_width,  # Độ dày viền TEXT
             self.blur_bg_checkbox.isChecked(), # Blur background
@@ -2075,18 +2275,31 @@ class AutoCutTab(QWidget):
                 self.log("⚠️ Đã dừng quá trình xử lý")
 
     def processing_finished(self, success, message):
+        if success:
+            self.log(f"✅ Hoàn thành: {message}")
+            self.current_queue_index += 1
+            if self.current_queue_index < self.total_queue_size:
+                # Tiêp tục xử lý file tiếp theo
+                self.process_next_in_queue()
+            else:
+                self.all_processing_finished()
+        else:
+            self.log(f"❌ Lỗi ở video thứ {self.current_queue_index + 1}: {message}")
+            self.progress_bar.setVisible(False)
+            self.process_btn.setEnabled(True)
+            self.process_btn.setText("▶️ BẮT ĐẦU XỬ LÝ")
+            self.stop_btn.setEnabled(False)
+            self.status_display.setText("🔴 Lỗi xử lý")
+            self.status_display.setStyleSheet(self.status_display.styleSheet().replace("#f39c12", "#e74c3c").replace("#fef9e7", "#fadbd8").replace("#27ae60", "#e74c3c"))
+            self.progress_label.setText(f"Có lỗi xảy ra ở {Path(self.current_processing_video).name}!")
+
+    def all_processing_finished(self):
         self.progress_bar.setVisible(False)
         self.process_btn.setEnabled(True)
         self.process_btn.setText("▶️ BẮT ĐẦU XỬ LÝ")
         self.stop_btn.setEnabled(False)  # Vô hiệu hóa nút Stop
         
-        if success:
-            self.status_display.setText("🟢 Hoàn thành!")
-            self.status_display.setStyleSheet(self.status_display.styleSheet().replace("#f39c12", "#27ae60").replace("#fef9e7", "#e8f6f3").replace("#e74c3c", "#27ae60"))
-            self.progress_label.setText("Đã hoàn thành!")
-            self.log(f"✅ {message}")
-        else:
-            self.status_display.setText("🔴 Lỗi xử lý")
-            self.status_display.setStyleSheet(self.status_display.styleSheet().replace("#f39c12", "#e74c3c").replace("#fef9e7", "#fadbd8").replace("#27ae60", "#e74c3c"))
-            self.progress_label.setText("Có lỗi xảy ra!")
-            self.log(f"❌ {message}")
+        self.status_display.setText("🟢 Hoàn thành toàn bộ!")
+        self.status_display.setStyleSheet(self.status_display.styleSheet().replace("#f39c12", "#27ae60").replace("#fef9e7", "#e8f6f3").replace("#e74c3c", "#27ae60"))
+        self.progress_label.setText("Đã xử lý xong tất cả các video!")
+        self.log(f"🎉 Hoàn tất quá trình xử lý hàng loạt ({self.total_queue_size} file)!")

@@ -1,7 +1,0 @@
-# Netscape HTTP Cookie File
-# This is a generated file! Do not edit.
-
-.facebook.com	TRUE	/	TRUE	1808672488	datr	6s6-aT20DbfHWNnleOpNoVzb
-.facebook.com	TRUE	/	TRUE	1781888488	fr	0Yf0vebxLrxYTyzB0..Bpvs7q..AAA.0.0.Bpvs7q.AWca8CrjozXGOIcIie3rD02fmu8
-.facebook.com	TRUE	/	TRUE	1808672488	sb	6s6-aetumF1XCixCEMyCJEuw
-.facebook.com	TRUE	/	TRUE	1774717289	wd	1280x800

@@ -245,11 +245,13 @@ class ShortsProcessor:
         
         # Get target duration from settings (default to 55 seconds)
         target_duration = settings.get('target_duration', 55)
+        min_videos = settings.get('min_videos', 2)
         if progress_callback:
-            progress_callback(f"🎯 Target compilation length: {target_duration} seconds")
+            progress_callback(f"🎯 Target compilation length: {target_duration} seconds (min {min_videos} videos)")
 
         batch_idx = 1
         video_pool = files.copy()
+        discarded_videos = []
         
         while video_pool:
             if check_cancel and check_cancel(): return
@@ -258,10 +260,11 @@ class ShortsProcessor:
             current_duration = 0.0
             
             # 1. Select clips for this batch
-            while video_pool:
+            pool_idx = 0
+            while pool_idx < len(video_pool):
                 if check_cancel and check_cancel(): return
                 
-                f_path = video_pool[0]
+                f_path = video_pool[pool_idx]
                 try:
                     # Quick check duration
                     dur = self.get_video_duration_fast(f_path)
@@ -273,62 +276,61 @@ class ShortsProcessor:
                     # Get duration mode and target
                     duration_mode = settings.get('duration_mode', 'min')  # 'max' or 'min'
                     
-                    # Check stopping conditions based on mode
-                    should_stop = False
-                    
                     if duration_mode == 'max':
                         # Mode: Under 1 minute (max 55s target, hard limit 60s)
-                        # Check BEFORE adding: stop if already reached target OR would exceed 60s
-                        if current_duration >= target_duration:
-                            should_stop = True
-                            stop_reason = f"reached target {target_duration}s"
-                        elif (current_duration + eff_dur) > 60:
-                            should_stop = True
-                            stop_reason = "would exceed 60s limit"
-                        
-                        if should_stop:
-                            # Don't add this video, batch is complete
-                            if progress_callback:
-                                progress_callback(f"Batch {batch_idx} complete at {current_duration:.1f}s ({stop_reason})")
-                            break
+                        # Check BEFORE adding: if this video exceeds 60s, skip it and look for shorter ones.
+                        if (current_duration + eff_dur) > 60:
+                            pool_idx += 1
+                            continue
                     
                     # Add the video to batch (for both modes)
                     current_batch_files.append(f_path)
                     current_duration += eff_dur
-                    video_pool.pop(0)
+                    video_pool.pop(pool_idx)
                     
                     if progress_callback: 
                         progress_callback(f"Adding to Video {batch_idx}: {os.path.basename(f_path)} (Total: {current_duration:.1f}s)")
                     
-                    if duration_mode == 'min':
-                        # Mode: Over 1 minute (min 65s target)
-                        # Check AFTER adding: stop if reached target
-                        if current_duration >= target_duration:
+                    if duration_mode == 'max':
+                        if current_duration >= target_duration and len(current_batch_files) >= min_videos:
                             if progress_callback:
-                                progress_callback(f"Batch {batch_idx} complete at {current_duration:.1f}s (reached target {target_duration}s)")
+                                progress_callback(f"Batch {batch_idx} complete at {current_duration:.1f}s")
+                            break
+                    elif duration_mode == 'min':
+                        # Mode: Over 1 minute (min 65s target)
+                        # Check AFTER adding: stop if reached target and at least min_videos videos
+                        if current_duration >= target_duration and len(current_batch_files) >= min_videos:
+                            if progress_callback:
+                                progress_callback(f"Batch {batch_idx} complete at {current_duration:.1f}s (reached target {target_duration}s with {len(current_batch_files)} videos)")
                             break
                         
                 except Exception as e:
                     if progress_callback: progress_callback(f"Error reading {os.path.basename(f_path)}: {e}")
-                    video_pool.pop(0) # Skip bad file
-
+                    video_pool.pop(pool_idx) # Skip bad file
 
             # Check if we actually added any videos to this batch
             if not current_batch_files:
-                # No videos were added - we're done
+                # No combinations found - we're done
                 if progress_callback: 
-                    progress_callback(f"No more videos available to create additional compilations.")
+                    progress_callback(f"No more valid combinations found.")
                 break
             
             # Check if batch meets minimum duration requirement
             # Accept batches that are at least 30 seconds OR 40% of target (whichever is lower)
             min_required = min(30, target_duration * 0.4)
-            if current_duration < min_required:
+            duration_mode = settings.get('duration_mode', 'min')
+            
+            if current_duration < min_required or len(current_batch_files) < min_videos:
                 if progress_callback: 
-                    progress_callback(f"Last batch only {current_duration:.1f}s (need at least {min_required:.0f}s). Moving to unused.")
-                # Put the clips back into the pool so they can be moved to unused folder
+                    reason = f"only {current_duration:.1f}s (need at least {min_required:.0f}s)"
+                    if len(current_batch_files) < min_videos:
+                        reason = f"only {len(current_batch_files)} videos (requires at least {min_videos} videos)"
+                    progress_callback(f"Last batch failed: {reason}. Skipping first video and retrying.")
+                # We discard the first video of the failed combination and retry to build new combinations
+                first_failed = current_batch_files.pop(0)
+                discarded_videos.append(first_failed)
                 video_pool.extend(current_batch_files)
-                break
+                continue
 
             # 2. Render this batch
             output_filename = f"output_{batch_idx:03d}.mp4"
@@ -345,6 +347,9 @@ class ShortsProcessor:
                 if progress_callback: progress_callback(f"Failed to render {output_filename}: {e}")
             
             batch_idx += 1
+        
+        # Add back any combinations that failed completely to be transferred to unused
+        video_pool.extend(discarded_videos)
         
         # After processing, move unused videos to subfolder
         if video_pool and progress_callback:
@@ -558,6 +563,10 @@ class ShortsProcessor:
         
         overlay_color = settings.get('overlay_color', (0, 0, 0))
         overlay_opacity = settings.get('overlay_opacity', 0)
+        
+        hflip = settings.get('hflip', False)
+        random_color = settings.get('random_color', False)
+        film_grain = settings.get('film_grain', False)
 
         ffmpeg_exe = self.get_ffmpeg_binary()
         if progress_callback:
@@ -597,8 +606,26 @@ class ShortsProcessor:
                 pad_y = int((CH - target_h) / 2 + off_y)
                 
                 # Build filter for this video
-                # Video filter: speed -> scale (bicubic or lanczos for much better scaling quality)
-                vf = f"setpts=PTS/{speed},scale={target_w}:{target_h}:flags=lanczos"
+                vf_filters = [f"setpts=PTS/{speed}"]
+                
+                if hflip:
+                    if i > 0:
+                        import random
+                        if random.choice([True, False]):
+                            vf_filters.append("hflip")
+                    
+                if random_color:
+                    import random
+                    br = round(random.uniform(-0.03, 0.03), 3)
+                    con = round(random.uniform(0.95, 1.05), 3)
+                    sat = round(random.uniform(0.95, 1.10), 3)
+                    vf_filters.append(f"eq=brightness={br}:contrast={con}:saturation={sat}")
+                
+                if film_grain:
+                    vf_filters.append("noise=alls=1:allf=t+u")
+                
+                vf_filters.append(f"scale={target_w}:{target_h}:flags=lanczos")
+                vf = ",".join(vf_filters)
                 
                 # Audio: speed (only if audio exists)
                 if speed > 2.0:

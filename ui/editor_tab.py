@@ -309,6 +309,16 @@ class EditorTab(QWidget):
         offy_layout.addWidget(self.offy_spin)
         param_layout.addLayout(offy_layout)
         
+        # Min videos
+        min_videos_layout = QVBoxLayout()
+        min_videos_layout.addWidget(QLabel("Ghép tối thiểu (Video)"))
+        self.min_videos_spin = QSpinBox()
+        self.min_videos_spin.setRange(1, 100)
+        self.min_videos_spin.setValue(2) # Default at least 2
+        self.min_videos_spin.setToolTip("Số video tối thiểu cần ghép trong 1 clip")
+        min_videos_layout.addWidget(self.min_videos_spin)
+        param_layout.addLayout(min_videos_layout)
+        
         # Target Duration
         duration_layout = QVBoxLayout()
         duration_layout.addWidget(QLabel("Video Length"))
@@ -327,6 +337,29 @@ class EditorTab(QWidget):
         param_layout.addLayout(duration_layout)
         param_group.setLayout(param_layout)
         layout.addWidget(param_group)
+        
+        # -- Anti-Detect (Bypass TikTok) --
+        anti_detect_group = QGroupBox("Lách Bản Quyền / Nguyên Tác (Anti-Detect)")
+        anti_detect_layout = QHBoxLayout()
+        
+        self.hflip_checkbox = QCheckBox("Lật ngang Video (Trừ clip đầu)")
+        self.hflip_checkbox.setStyleSheet("font-weight: bold; color: #d35400;")
+        self.hflip_checkbox.setToolTip("Video đầu giữ nguyên, các video ghép phía sau sẽ được lật ngẫu nhiên")
+        anti_detect_layout.addWidget(self.hflip_checkbox)
+        
+        self.random_color_checkbox = QCheckBox("Random màu sắc")
+        self.random_color_checkbox.setStyleSheet("font-weight: bold; color: #d35400;")
+        self.random_color_checkbox.setToolTip("Xáo trộn nhẹ độ sáng, tương phản để đổi mã pixel từng video")
+        anti_detect_layout.addWidget(self.random_color_checkbox)
+
+        self.film_grain_checkbox = QCheckBox("Thêm Nhiễu hạt (Noise)")
+        self.film_grain_checkbox.setStyleSheet("font-weight: bold; color: #d35400;")
+        self.film_grain_checkbox.setToolTip("Phủ lớp nhiễu động siêu mờ để qua mặt check trùng khớp khung hình (Frame by Frame)")
+        anti_detect_layout.addWidget(self.film_grain_checkbox)
+        
+        anti_detect_layout.addStretch()
+        anti_detect_group.setLayout(anti_detect_layout)
+        layout.addWidget(anti_detect_group)
         
         # -- Color Overlay Base Option --
         overlay_group = QGroupBox("Cấu hình màu sắc, trộn & tốc độ luồng")
@@ -541,6 +574,7 @@ class EditorTab(QWidget):
     
     def get_current_settings(self):
         return {
+            'min_videos': getattr(self, 'min_videos_spin', None) and self.min_videos_spin.value() or 2,
             'speed': self.speed_spin.value(),
             'scale_x': self.scalex_spin.value(),
             'scale_y': self.scaley_spin.value(),
@@ -552,7 +586,10 @@ class EditorTab(QWidget):
             'duration_mode': 'max' if self.duration_under_1min.isChecked() else 'min',
             'overlay_color': self.overlay_color,
             'overlay_opacity': self.overlay_opacity,
-            'workers': self.workers_spin.value()
+            'workers': self.workers_spin.value(),
+            'hflip': getattr(self, 'hflip_checkbox', None) and self.hflip_checkbox.isChecked(),
+            'random_color': getattr(self, 'random_color_checkbox', None) and self.random_color_checkbox.isChecked(),
+            'film_grain': getattr(self, 'film_grain_checkbox', None) and self.film_grain_checkbox.isChecked()
         }
 
     def update_estimation_debounced(self):
