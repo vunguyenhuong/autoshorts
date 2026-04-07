@@ -337,9 +337,9 @@ class EditorTab(QWidget):
         duration_layout.setContentsMargins(0, 0, 0, 0)
         duration_layout.addWidget(QLabel("Thời lượng video"))
         
-        self.duration_under_1min = QRadioButton("< 1 phút (max 59s)")
+        self.duration_under_1min = QRadioButton("< 1 phút (max 60s)")
         self.duration_under_1min.setChecked(True)
-        self.duration_under_1min.setToolTip("Video tối đa 59s, đảm bảo không vượt quá 1 phút")
+        self.duration_under_1min.setToolTip("Video tối đa 60s, đảm bảo không vượt quá 1 phút")
         self.duration_under_1min.toggled.connect(self.update_estimation_debounced)
         duration_layout.addWidget(self.duration_under_1min)
         
@@ -589,7 +589,7 @@ class EditorTab(QWidget):
                 self.log_message.emit(f"Đã chọn màu lớp phủ: RGB{self.overlay_color}")
 
     def get_target_duration(self):
-        return 59 if self.duration_under_1min.isChecked() else 60
+        return 60 if self.duration_under_1min.isChecked() else 60
     
     def get_current_settings(self):
         return {
@@ -648,7 +648,6 @@ class EditorTab(QWidget):
     
     def on_estimation_finished(self, results, total_videos):
         self.progress_bar.setVisible(False)
-        self.run_btn.setEnabled(True)
         
         skip_merge = self.skip_merge_checkbox.isChecked()
         target_duration = self.get_target_duration()
@@ -663,10 +662,16 @@ class EditorTab(QWidget):
                 if not skip_merge and est > 0:
                     total_estimated += est
         
+        # Decide if can run
+        can_run = False
         if skip_merge:
-             self.global_est_label.setText(f"📋 Tổng quát: Sẽ có {total_videos} video độc lập được xuất ra từ {valid_tasks} tác vụ.")
+            can_run = total_videos > 0
+            self.global_est_label.setText(f"📋 Tổng quát: Sẽ có {total_videos} video độc lập được xuất ra từ {valid_tasks} tác vụ.")
         else:
-             self.global_est_label.setText(f"📋 Tổng quát: Dự kiến xuất {total_estimated} clip dài (~{target_duration}s) từ tổng số {total_videos} video gốc.")
+            can_run = total_estimated > 0
+            self.global_est_label.setText(f"📋 Tổng quát: Dự kiến xuất {total_estimated} clip dài (~{target_duration}s) từ tổng số {total_videos} video gốc.")
+            
+        self.run_btn.setEnabled(can_run)
 
 
     def start_processing(self):
