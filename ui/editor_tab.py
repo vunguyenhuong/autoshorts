@@ -20,14 +20,14 @@ class VideoProcessorThread(QThread):
         self.is_running = True
 
     def run(self):
-        self.progress.emit(f"🚀 Bắt đầu xử lý {len(self.tasks)} tác vụ Editor...")
+        self.progress.emit(f"🚀 Bắt đầu xử lý {len(self.tasks)} task...")
         try:
             for i, task in enumerate(self.tasks):
                 if not self.is_running:
                     self.progress.emit("Bị gián đoạn bởi người dùng.")
                     break
                 
-                self.progress.emit(f"\n--- 🎞️ Đang chạy Tác vụ {i+1}/{len(self.tasks)} ---")
+                self.progress.emit(f"\n--- 🎞️ Đang chạy task {i+1}/{len(self.tasks)} ---")
                 self.progress.emit(f"Nguồn: {task['source']}")
                 self.progress.emit(f"Đích: {task['output']}")
                 
@@ -70,12 +70,8 @@ class EstimationThread(QThread):
                     results.append((-1, 0))
                     continue
                 
-                estimated = self.processor.estimate_compilations(src, self.settings)
-                
-                # Count videos in folder
-                valid_exts = ['.mp4', '.mov', '.mkv']
-                video_count = len([f for f in os.listdir(src) 
-                                 if os.path.splitext(f)[1].lower() in valid_exts])
+                # estimate_compilations now returns (estimated_compilations, valid_files_count)
+                estimated, video_count = self.processor.estimate_compilations(src, self.settings)
                 
                 total_videos += video_count
                 results.append((estimated, video_count))
@@ -87,7 +83,7 @@ class EstimationThread(QThread):
 
 class EditorTaskWidget(QGroupBox):
     def __init__(self, remove_callback=None, param_callback=None, task_index=1):
-        super().__init__(f"🎞️ Tác vụ {task_index}")
+        super().__init__(f"🎞️ Task {task_index}")
         self.remove_callback = remove_callback
         self.param_callback = param_callback # triggers estimation
         
@@ -119,9 +115,10 @@ class EditorTaskWidget(QGroupBox):
         self.src_btn.setFixedWidth(120)
         self.src_btn.clicked.connect(self.browse_source)
         self.src_label = QLabel("Not Selected")
+        self.src_label.setWordWrap(True)
         self.src_label.setStyleSheet("color: #888;")
         src_layout.addWidget(self.src_btn)
-        src_layout.addWidget(self.src_label)
+        src_layout.addWidget(self.src_label, 1) # Give stretch
         layout.addLayout(src_layout)
 
         # Output
@@ -130,9 +127,10 @@ class EditorTaskWidget(QGroupBox):
         self.dst_btn.setFixedWidth(120)
         self.dst_btn.clicked.connect(self.browse_output)
         self.dst_label = QLabel("Not Selected")
+        self.dst_label.setWordWrap(True)
         self.dst_label.setStyleSheet("color: #888;")
         dst_layout.addWidget(self.dst_btn)
-        dst_layout.addWidget(self.dst_label)
+        dst_layout.addWidget(self.dst_label, 1) # Give stretch
         
         if self.remove_callback:
             self.remove_btn = QPushButton("❌ Xóa")
@@ -145,6 +143,7 @@ class EditorTaskWidget(QGroupBox):
 
         # Estimation Label
         self.est_label = QLabel("Chưa chọn nguồn")
+        self.est_label.setWordWrap(True)
         self.est_label.setStyleSheet("color: #666; font-size: 11px; font-style: italic;")
         layout.addWidget(self.est_label)
 
@@ -232,27 +231,30 @@ class EditorTab(QWidget):
         self.task_widgets = []
         self.task_counter = 0
         
-        tasks_action_layout = QHBoxLayout()
+        tasks_action_container = QWidget()
+        tasks_action_layout = QHBoxLayout(tasks_action_container)
+        tasks_action_layout.setContentsMargins(0, 0, 0, 0)
+        tasks_action_layout.setSpacing(10)
         
-        self.add_task_btn = QPushButton("➕ Thêm Tác Vụ Editor")
+        self.add_task_btn = QPushButton("➕ Thêm Tác Vụ")
         self.add_task_btn.setFixedHeight(40)
-        self.add_task_btn.setStyleSheet("font-size: 14px; font-weight: bold; background-color: #5cb85c; color: white;")
+        self.add_task_btn.setStyleSheet("font-size: 13px; font-weight: bold; background-color: #5cb85c; color: white;")
         self.add_task_btn.clicked.connect(self.add_task_widget)
-        tasks_action_layout.addWidget(self.add_task_btn)
+        tasks_action_layout.addWidget(self.add_task_btn, 1)
 
         self.save_cfg_btn = QPushButton("💾 Lưu cấu hình")
         self.save_cfg_btn.setFixedHeight(40)
-        self.save_cfg_btn.setStyleSheet("font-size: 14px; font-weight: bold; background-color: #f0ad4e; color: white;")
+        self.save_cfg_btn.setStyleSheet("font-size: 13px; font-weight: bold; background-color: #f0ad4e; color: white;")
         self.save_cfg_btn.clicked.connect(self.save_config)
-        tasks_action_layout.addWidget(self.save_cfg_btn)
+        tasks_action_layout.addWidget(self.save_cfg_btn, 1)
 
         self.load_cfg_btn = QPushButton("📂 Tải cấu hình")
         self.load_cfg_btn.setFixedHeight(40)
-        self.load_cfg_btn.setStyleSheet("font-size: 14px; font-weight: bold; background-color: #5bc0de; color: white;")
+        self.load_cfg_btn.setStyleSheet("font-size: 13px; font-weight: bold; background-color: #5bc0de; color: white;")
         self.load_cfg_btn.clicked.connect(self.load_config)
-        tasks_action_layout.addWidget(self.load_cfg_btn)
+        tasks_action_layout.addWidget(self.load_cfg_btn, 1)
 
-        layout.addLayout(tasks_action_layout)
+        layout.addWidget(tasks_action_container)
 
         self.add_task_widget(is_first=True)
 
@@ -330,29 +332,31 @@ class EditorTab(QWidget):
         param_layout.addLayout(only_under_1min_layout)
         
         # Target Duration
-        duration_layout = QVBoxLayout()
-        duration_layout.addWidget(QLabel("Video Length"))
+        self.duration_container = QWidget()
+        duration_layout = QVBoxLayout(self.duration_container)
+        duration_layout.setContentsMargins(0, 0, 0, 0)
+        duration_layout.addWidget(QLabel("Thời lượng video"))
         
-        self.duration_under_1min = QRadioButton("< 1 phút (max 55s)")
+        self.duration_under_1min = QRadioButton("< 1 phút (max 59s)")
         self.duration_under_1min.setChecked(True)
-        self.duration_under_1min.setToolTip("Video tối đa 55s, đảm bảo không vượt quá 60s")
+        self.duration_under_1min.setToolTip("Video tối đa 59s, đảm bảo không vượt quá 1 phút")
         self.duration_under_1min.toggled.connect(self.update_estimation_debounced)
         duration_layout.addWidget(self.duration_under_1min)
         
-        self.duration_over_1min = QRadioButton("≥ 1 phút (min 65s)")
-        self.duration_over_1min.setToolTip("Video tối thiểu 65s (trên 1 phút)")
+        self.duration_over_1min = QRadioButton("≥ 1 phút (min 60s)")
+        self.duration_over_1min.setToolTip("Video tối thiểu 60s (trên 1 phút)")
         self.duration_over_1min.toggled.connect(self.update_estimation_debounced)
         duration_layout.addWidget(self.duration_over_1min)
         
-        param_layout.addLayout(duration_layout)
+        param_layout.addWidget(self.duration_container)
         param_group.setLayout(param_layout)
         layout.addWidget(param_group)
         
         # -- Anti-Detect (Bypass TikTok) --
-        anti_detect_group = QGroupBox("Lách Bản Quyền / Nguyên Tác (Anti-Detect)")
+        anti_detect_group = QGroupBox("Hiệu ứng")
         anti_detect_layout = QHBoxLayout()
         
-        self.hflip_checkbox = QCheckBox("Lật ngang Video (Trừ clip đầu)")
+        self.hflip_checkbox = QCheckBox("Lật")
         self.hflip_checkbox.setStyleSheet("font-weight: bold; color: #d35400;")
         self.hflip_checkbox.setToolTip("Video đầu giữ nguyên, các video ghép phía sau sẽ được lật ngẫu nhiên")
         anti_detect_layout.addWidget(self.hflip_checkbox)
@@ -362,7 +366,7 @@ class EditorTab(QWidget):
         self.random_color_checkbox.setToolTip("Xáo trộn nhẹ độ sáng, tương phản để đổi mã pixel từng video")
         anti_detect_layout.addWidget(self.random_color_checkbox)
 
-        self.film_grain_checkbox = QCheckBox("Thêm Nhiễu hạt (Noise)")
+        self.film_grain_checkbox = QCheckBox("Nhiễu hạt")
         self.film_grain_checkbox.setStyleSheet("font-weight: bold; color: #d35400;")
         self.film_grain_checkbox.setToolTip("Phủ lớp nhiễu động siêu mờ để qua mặt check trùng khớp khung hình (Frame by Frame)")
         anti_detect_layout.addWidget(self.film_grain_checkbox)
@@ -372,7 +376,7 @@ class EditorTab(QWidget):
         layout.addWidget(anti_detect_group)
         
         # -- Color Overlay Base Option --
-        overlay_group = QGroupBox("Cấu hình màu sắc, trộn & tốc độ luồng")
+        overlay_group = QGroupBox("Cấu hình chung")
         overlay_layout = QHBoxLayout()
         
         overlay_layout.addWidget(QLabel("Màu phủ:"))
@@ -416,6 +420,7 @@ class EditorTab(QWidget):
         self.skip_merge_checkbox = QCheckBox("Không Ghép (Chỉ Edit lẻ)")
         self.skip_merge_checkbox.setStyleSheet("font-weight: bold; color: #d35400;")
         self.skip_merge_checkbox.stateChanged.connect(self.update_estimation_debounced)
+        self.skip_merge_checkbox.stateChanged.connect(self.toggle_duration_visibility)
         overlay_layout.addWidget(self.skip_merge_checkbox)
         
         overlay_layout.addStretch()
@@ -432,11 +437,15 @@ class EditorTab(QWidget):
 
         # -- Global Estimation Info --
         self.global_est_label = QLabel("📊 Thêm tác vụ và chọn Thư mục Nguồn để máy tính toán.")
+        self.global_est_label.setWordWrap(True)
         self.global_est_label.setStyleSheet("color: #0d6efd; font-weight: bold; padding: 5px;")
         layout.addWidget(self.global_est_label)
 
         # -- Actions --
-        actions_layout = QHBoxLayout()
+        actions_container = QWidget()
+        actions_layout = QHBoxLayout(actions_container)
+        actions_layout.setContentsMargins(0, 0, 0, 0)
+        actions_layout.setSpacing(10)
         
         self.run_btn = QPushButton("▶ Start Processing")
         self.run_btn.setFixedHeight(40)
@@ -454,7 +463,7 @@ class EditorTab(QWidget):
             }
         """)
         self.run_btn.clicked.connect(self.start_processing)
-        actions_layout.addWidget(self.run_btn)
+        actions_layout.addWidget(self.run_btn, 1)
         
         self.stop_btn = QPushButton("⏹ Stop Processing")
         self.stop_btn.setFixedHeight(40)
@@ -473,9 +482,9 @@ class EditorTab(QWidget):
         """)
         self.stop_btn.clicked.connect(self.stop_processing)
         self.stop_btn.setEnabled(False)
-        actions_layout.addWidget(self.stop_btn)
+        actions_layout.addWidget(self.stop_btn, 1)
         
-        layout.addLayout(actions_layout)
+        layout.addWidget(actions_container)
         
         # -- Progress Bar --
         self.progress_bar = QProgressBar()
@@ -580,7 +589,7 @@ class EditorTab(QWidget):
                 self.log_message.emit(f"Đã chọn màu lớp phủ: RGB{self.overlay_color}")
 
     def get_target_duration(self):
-        return 55 if self.duration_under_1min.isChecked() else 65
+        return 59 if self.duration_under_1min.isChecked() else 60
     
     def get_current_settings(self):
         return {
@@ -602,6 +611,12 @@ class EditorTab(QWidget):
             'film_grain': getattr(self, 'film_grain_checkbox', None) and self.film_grain_checkbox.isChecked(),
             'only_under_1min': self.only_under_1min_checkbox.isChecked()
         }
+
+    def toggle_duration_visibility(self):
+        """Show/Hide duration selection depending on merge mode"""
+        is_skipping = self.skip_merge_checkbox.isChecked()
+        if hasattr(self, 'duration_container'):
+            self.duration_container.setVisible(not is_skipping)
 
     def update_estimation_debounced(self):
         self.estimation_timer.stop()

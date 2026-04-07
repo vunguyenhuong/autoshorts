@@ -1,7 +1,7 @@
 import os
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, QPushButton, 
-    QLabel, QProgressBar, QSpinBox, QFileDialog, QGroupBox, QMessageBox, QCheckBox, QTextEdit, QScrollArea
+    QLabel, QProgressBar, QSpinBox, QFileDialog, QGroupBox, QMessageBox, QCheckBox, QTextEdit, QScrollArea, QSizePolicy
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from core.downloader import ShortsDownloader
@@ -121,7 +121,7 @@ class DownloaderThread(QThread):
             url = video['url']
             channel_url = video.get('channel_url')
             tid = video.get('task_id', 0)
-            label = f"[Tác vụ {tid + 1}]"
+            label = f"[Task {tid + 1}]"
             
             vid_folder = video.get('folder', os.path.join(os.path.expanduser("~"), "Documents", "AutoShorts", "downloads"))
             if not os.path.exists(vid_folder):
@@ -271,7 +271,7 @@ class DownloaderThread(QThread):
 
 class DownloadTaskWidget(QGroupBox):
     def __init__(self, remove_callback=None, task_index=1):
-        super().__init__(f"📥 Tác vụ {task_index}")
+        super().__init__(f"📥 Task {task_index}")
         self.remove_callback = remove_callback
         
         # Style the groupbox
@@ -316,9 +316,11 @@ class DownloadTaskWidget(QGroupBox):
 
         row1.addWidget(QLabel("Save to:"))
         self.folder_input = QLineEdit()
+        self.folder_input.setMinimumWidth(10) # Allow shrinking
+        self.folder_input.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         import os
         self.folder_input.setText(os.path.join(os.path.expanduser("~"), "Documents", "AutoShorts", "downloads"))
-        row1.addWidget(self.folder_input)
+        row1.addWidget(self.folder_input, 1) # Give it stretch
         
         self.browse_btn = QPushButton("📁 Browse")
         self.browse_btn.setFixedWidth(80)
@@ -396,33 +398,38 @@ class DownloaderTab(QWidget):
         self.task_widgets = []
         self.task_counter = 0
         
-        tasks_action_layout = QHBoxLayout()
+        tasks_action_container = QWidget()
+        tasks_action_layout = QHBoxLayout(tasks_action_container)
+        tasks_action_layout.setContentsMargins(0, 0, 0, 0)
+        tasks_action_layout.setSpacing(10)
         
-        self.add_task_btn = QPushButton("➕ Thêm tác vụ")
+        self.add_task_btn = QPushButton("➕ Thêm Tác Vụ")
         self.add_task_btn.setFixedHeight(40)
-        self.add_task_btn.setStyleSheet("font-size: 14px; font-weight: bold; background-color: #5cb85c; color: white;")
+        self.add_task_btn.setStyleSheet("font-size: 13px; font-weight: bold; background-color: #5cb85c; color: white;")
         self.add_task_btn.clicked.connect(self.add_task_widget)
-        tasks_action_layout.addWidget(self.add_task_btn)
+        tasks_action_layout.addWidget(self.add_task_btn, 1)
 
         self.save_cfg_btn = QPushButton("💾 Lưu cấu hình")
         self.save_cfg_btn.setFixedHeight(40)
-        self.save_cfg_btn.setStyleSheet("font-size: 14px; font-weight: bold; background-color: #f0ad4e; color: white;")
+        self.save_cfg_btn.setStyleSheet("font-size: 13px; font-weight: bold; background-color: #f0ad4e; color: white;")
         self.save_cfg_btn.clicked.connect(self.save_config)
-        tasks_action_layout.addWidget(self.save_cfg_btn)
+        tasks_action_layout.addWidget(self.save_cfg_btn, 1)
 
         self.load_cfg_btn = QPushButton("📂 Tải cấu hình")
         self.load_cfg_btn.setFixedHeight(40)
-        self.load_cfg_btn.setStyleSheet("font-size: 14px; font-weight: bold; background-color: #5bc0de; color: white;")
+        self.load_cfg_btn.setStyleSheet("font-size: 13px; font-weight: bold; background-color: #5bc0de; color: white;")
         self.load_cfg_btn.clicked.connect(self.load_config)
-        tasks_action_layout.addWidget(self.load_cfg_btn)
+        tasks_action_layout.addWidget(self.load_cfg_btn, 1)
 
-        layout.addLayout(tasks_action_layout)
+        layout.addWidget(tasks_action_container)
 
         # Add initial task
         self.add_task_widget(is_first=True)
 
         # -- Info Area --
         self.info_label = QLabel("Sẵn sàng.")
+        self.info_label.setWordWrap(True)
+        self.info_label.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
         self.info_label.setStyleSheet("color: #888; font-weight: bold;")
         layout.addWidget(self.info_label)
 
@@ -459,13 +466,16 @@ class DownloaderTab(QWidget):
         layout.addWidget(dl_group)
 
         # Action Buttons --
-        dl_actions_layout = QHBoxLayout()
+        dl_actions_container = QWidget()
+        dl_actions_layout = QHBoxLayout(dl_actions_container)
+        dl_actions_layout.setContentsMargins(0, 0, 0, 0)
+        dl_actions_layout.setSpacing(10)
         
         self.dl_btn = QPushButton("▶ Start Download")
         self.dl_btn.setFixedHeight(40)
         self.dl_btn.setStyleSheet("font-size: 14px; font-weight: bold; background-color: #0275d8; color: white;")
         self.dl_btn.clicked.connect(self.start_download)
-        dl_actions_layout.addWidget(self.dl_btn)
+        dl_actions_layout.addWidget(self.dl_btn, 1)
         
         self.stop_btn = QPushButton("⏹ Stop Download")
         self.stop_btn.setFixedHeight(40)
@@ -483,9 +493,9 @@ class DownloaderTab(QWidget):
         """)
         self.stop_btn.clicked.connect(self.stop_download)
         self.stop_btn.setEnabled(False)
-        dl_actions_layout.addWidget(self.stop_btn)
+        dl_actions_layout.addWidget(self.stop_btn, 1)
         
-        layout.addLayout(dl_actions_layout)
+        layout.addWidget(dl_actions_container)
         
         # -- Progress --
         self.progress_bar = QProgressBar()
@@ -748,7 +758,7 @@ class DownloaderTab(QWidget):
         """Update UI when a video is downloaded"""
         self.download_done += 1
         self.info_label.setText(
-            f"⬇️ Tiến độ tải... | Thành đạt: {self.download_done}/{self.download_total} "
+            f"⬇️ Tiến độ tải... | Thành công: {self.download_done}/{self.download_total} "
             f"(Kho dự phòng bổ sung liên tục)"
         )
 

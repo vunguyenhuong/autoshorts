@@ -17,3 +17,6 @@ core/downloads/
 
 # exe
 *.exe
+
+#settings
+settings/

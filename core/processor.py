@@ -134,7 +134,7 @@ class ShortsProcessor:
         try:
             files = self.scan_folder(source_folder, sort_by_views=False)
             if not files:
-                return 0
+                return 0, 0
             
             total_duration = 0.0
             speed = settings.get('speed', 1.0)
@@ -142,6 +142,7 @@ class ShortsProcessor:
             min_videos = settings.get('min_videos', 1)
             duration_mode = settings.get('duration_mode', 'min')
             only_under_1min = settings.get('only_under_1min', False)
+            skip_merge = settings.get('skip_merge', False)
             
             valid_files_count = 0
             
@@ -150,8 +151,10 @@ class ShortsProcessor:
                 try:
                     dur = self.get_video_duration_fast(f_path)
                     if dur > 0:
-                        # Duration check: Skip videos > 55s if under 1 min mode is active or strict filter is ON
-                        if (duration_mode == 'max' or only_under_1min) and dur > 60:
+                        # Duration check: Skip videos > 59s if:
+                        # 1. In Merge Mode AND "Under 1 Min" mode is selected
+                        # 2. OR Strict "Only Under 1 Min" checkbox is ON
+                        if ((not skip_merge and duration_mode == 'max') or only_under_1min) and dur > 59:
                             continue
                             
                         valid_files_count += 1
@@ -161,16 +164,16 @@ class ShortsProcessor:
                     pass
             
             if valid_files_count < min_videos or total_duration < target_duration:
-                return 0
+                return 0, valid_files_count
             
             # Realistic estimation: total duration divided by target, 
             # limited by the fact we need at least min_videos per part.
             est_by_duration = int(total_duration / target_duration)
             est_by_count = valid_files_count // min_videos
             
-            return max(1, min(est_by_duration, est_by_count))
+            return max(1, min(est_by_duration, est_by_count)), valid_files_count
         except:
-            return 0 
+            return 0, 0 
 
     def process_individual_videos(self, source_folder, output_folder, settings, progress_callback=None, check_cancel=None):
         """
@@ -183,6 +186,38 @@ class ShortsProcessor:
         files = self.scan_folder(source_folder, sort_by_views=False)  # No need to sort
         if not files:
             if progress_callback: progress_callback("No videos found in source folder.")
+            return
+
+        # Filtering logic for individual videos
+        duration_mode = settings.get('duration_mode', 'min')
+        only_under_1min = settings.get('only_under_1min', False)
+        skip_merge = settings.get('skip_merge', False)
+        
+        video_pool = []
+        discarded_videos = []
+        
+        # Filtering logic for individual videos: Only filter by duration if strictly requested via checkbox
+        if only_under_1min:
+            if progress_callback:
+                progress_callback(f"🛡️ Bật chế độ lọc nghiêm ngặt (chỉ lấy video < 59s) cho Edit lẻ")
+            
+            for f in files:
+                dur = self.get_video_duration_fast(f)
+                if dur > 59:
+                    discarded_videos.append(f)
+                    if progress_callback:
+                        progress_callback(f"⏭️ Loại bỏ video > 59s: {os.path.basename(f)}")
+                else:
+                    video_pool.append(f)
+            
+            # Move discarded others if any
+            if discarded_videos:
+                self._move_to_unused(source_folder, discarded_videos, progress_callback)
+            
+            files = video_pool
+        
+        if not files:
+            if progress_callback: progress_callback("No valid videos found after filtering.")
             return
         
         total_files = len(files)
@@ -269,20 +304,20 @@ class ShortsProcessor:
         
         duration_mode = settings.get('duration_mode', 'min')
         only_under_1min = settings.get('only_under_1min', False)
+        skip_merge = settings.get('skip_merge', False) # Should be false here
         
         if progress_callback and (duration_mode == 'max' or only_under_1min):
-            progress_callback(f"🛡️ Bật chế độ lọc nghiêm ngặt (chỉ lấy video < 60s)")
+            progress_callback(f"🛡️ Bật chế độ lọc nghiêm ngặt (chỉ lấy video < 59s)")
 
         for f in files:
             dur = self.get_video_duration_fast(f)
-            # If target duration mode is "Under 1 Min" OR user checked "Only Under 1 Min", 
-            # we permanently discard anything over 1 min
-            if (duration_mode == 'max' or only_under_1min) and dur > 60:
+            # Filter condition: Merge mode with 'max' duration OR explicit strict filter
+            if ((not skip_merge and duration_mode == 'max') or only_under_1min) and dur > 59:
                 discarded_videos.append(f)
                 if progress_callback:
-                    progress_callback(f"⏭️ Loại bỏ video > 60s: {os.path.basename(f)}")
-            else:
-                video_pool.append(f)
+                    progress_callback(f"⏭️ Loại bỏ video > 59s: {os.path.basename(f)}")
+                else:
+                    video_pool.append(f)
         
         if not video_pool:
             if progress_callback: progress_callback("No valid videos found after filtering.")
@@ -313,8 +348,8 @@ class ShortsProcessor:
                     
                     # Check selection limits
                     if duration_mode == 'max':
-                        # Mode: Under 1 minute (hard limit 60s)
-                        if (current_duration + eff_dur) > 60:
+                        # Mode: Under 1 minute (hard limit 59s)
+                        if (current_duration + eff_dur) > 59:
                             pool_idx += 1
                             continue
                     

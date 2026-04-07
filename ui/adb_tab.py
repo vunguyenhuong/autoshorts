@@ -134,26 +134,29 @@ class AdbTab(QWidget):
         self.task_widgets = []
         self.task_counter = 0
         
-        # Tools bar (Add Task, Save/Load)
         tasks_action_layout = QHBoxLayout()
+        tasks_action_layout.setSpacing(10)
         
-        self.add_task_btn = QPushButton("➕ Thêm Hộp Tác Vụ")
+        self.add_task_btn = QPushButton("➕ Thêm Tác Vụ")
         self.add_task_btn.setFixedHeight(40)
-        self.add_task_btn.setStyleSheet("font-size: 14px; font-weight: bold; background-color: #5cb85c; color: white;")
+        self.add_task_btn.setMinimumWidth(80)
+        self.add_task_btn.setStyleSheet("font-size: 13px; font-weight: bold; background-color: #5cb85c; color: white;")
         self.add_task_btn.clicked.connect(self.add_task_widget)
-        tasks_action_layout.addWidget(self.add_task_btn)
+        tasks_action_layout.addWidget(self.add_task_btn, 1)
 
         self.save_cfg_btn = QPushButton("💾 Lưu Cấu Hình")
         self.save_cfg_btn.setFixedHeight(40)
-        self.save_cfg_btn.setStyleSheet("font-size: 14px; font-weight: bold; background-color: #f0ad4e; color: white;")
+        self.save_cfg_btn.setMinimumWidth(80)
+        self.save_cfg_btn.setStyleSheet("font-size: 13px; font-weight: bold; background-color: #f0ad4e; color: white;")
         self.save_cfg_btn.clicked.connect(self.save_config)
-        tasks_action_layout.addWidget(self.save_cfg_btn)
+        tasks_action_layout.addWidget(self.save_cfg_btn, 1)
 
         self.load_cfg_btn = QPushButton("📂 Tải Cấu Hình")
         self.load_cfg_btn.setFixedHeight(40)
-        self.load_cfg_btn.setStyleSheet("font-size: 14px; font-weight: bold; background-color: #5bc0de; color: white;")
+        self.load_cfg_btn.setMinimumWidth(80)
+        self.load_cfg_btn.setStyleSheet("font-size: 13px; font-weight: bold; background-color: #5bc0de; color: white;")
         self.load_cfg_btn.clicked.connect(self.load_config)
-        tasks_action_layout.addWidget(self.load_cfg_btn)
+        tasks_action_layout.addWidget(self.load_cfg_btn, 1)
 
         layout.addLayout(tasks_action_layout)
 
@@ -162,6 +165,7 @@ class AdbTab(QWidget):
 
         # -- Info Area --
         self.info_label = QLabel("Sẵn sàng truyền dữ liệu.")
+        self.info_label.setWordWrap(True)
         self.info_label.setStyleSheet("color: #888; font-weight: bold;")
         layout.addWidget(self.info_label)
 
@@ -172,7 +176,7 @@ class AdbTab(QWidget):
         self.start_btn.setFixedHeight(40)
         self.start_btn.setStyleSheet("font-size: 14px; font-weight: bold; background-color: #0275d8; color: white;")
         self.start_btn.clicked.connect(self.start_transfer)
-        actions_layout.addWidget(self.start_btn)
+        actions_layout.addWidget(self.start_btn, 1)
         
         self.stop_btn = QPushButton("⏹ Dừng lại")
         self.stop_btn.setFixedHeight(40)
@@ -190,7 +194,7 @@ class AdbTab(QWidget):
         """)
         self.stop_btn.clicked.connect(self.stop_transfer)
         self.stop_btn.setEnabled(False)
-        actions_layout.addWidget(self.stop_btn)
+        actions_layout.addWidget(self.stop_btn, 1)
         
         layout.addLayout(actions_layout)
         
