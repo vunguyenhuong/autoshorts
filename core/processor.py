@@ -8,6 +8,7 @@ import subprocess
 class ShortsProcessor:
     def __init__(self):
         self.download_history = None
+        self._duration_cache = {} # path -> (mtime, duration)
         self._load_download_history()
     
     def _load_download_history(self):
@@ -41,8 +42,8 @@ class ShortsProcessor:
             pass
         return 0
 
-    def scan_folder(self, folder, sort_by_views=True):
-        """Scan folder and optionally sort by view count"""
+    def scan_folder(self, folder, sort_by_views=True, random_order=True):
+        """Scan folder and optionally sort by view count or randomize"""
         valid_exts = ['.mp4', '.mov', '.mkv']
         files = [
             os.path.join(folder, f) for f in os.listdir(folder) 
@@ -54,14 +55,27 @@ class ShortsProcessor:
             files_with_views = [(f, self.get_video_view_count(f)) for f in files]
             files_with_views.sort(key=lambda x: x[1], reverse=True)
             files = [f for f, _ in files_with_views]
-        else:
+        elif random_order:
             # Randomize video order (old behavior)
             random.shuffle(files)
+        else:
+            # Stable alphabetical order (useful for estimation)
+            files.sort()
         
         return files
 
     def get_video_duration_fast(self, file_path):
-        """Fast duration extraction using ffprobe, fallback to ffmpeg parsing"""
+        """Fast duration extraction with caching implementation"""
+        # 0. Check cache
+        try:
+            mtime = os.path.getmtime(file_path)
+            if file_path in self._duration_cache:
+                cached_mtime, cached_dur = self._duration_cache[file_path]
+                if cached_mtime == mtime:
+                    return cached_dur
+        except:
+            pass
+
         import subprocess
         import re
         
@@ -99,7 +113,7 @@ class ShortsProcessor:
                 
                 if result.returncode == 0 and result.stdout.strip():
                     dur = float(result.stdout.strip())
-                    return dur
+                    return self._cache_duration(file_path, dur)
             except Exception as e:
                 pass
         
@@ -122,19 +136,34 @@ class ShortsProcessor:
                 m = int(matcher.group(2))
                 s = float(matcher.group(3))
                 dur = h*3600 + m*60 + s
-                return dur
+                return self._cache_duration(file_path, dur)
         except Exception as e:
             print(f"Error getting duration for {file_path}: {e}")
             pass
 
+        # 3. Cache result before returning
+        try:
+            self._duration_cache[file_path] = (os.path.getmtime(file_path), 0.0)
+        except:
+            pass
         return 0.0
+
+    def _cache_duration(self, file_path, duration):
+        """Internal helper to save duration to cache"""
+        try:
+            self._duration_cache[file_path] = (os.path.getmtime(file_path), duration)
+        except:
+            pass
+        return duration
 
     def estimate_compilations(self, source_folder, settings):
         """
         Estimate how many compilation videos will be created by simulating the batching logic.
         """
         try:
-            files = self.scan_folder(source_folder, sort_by_views=False)
+            sort_by_views = settings.get('sort_by_views', True)
+            # Use stable order (no random shuffle) for estimation to prevent jitter
+            files = self.scan_folder(source_folder, sort_by_views=sort_by_views, random_order=False)
             if not files:
                 return 0, 0
             
@@ -152,7 +181,7 @@ class ShortsProcessor:
                     dur = self.get_video_duration_fast(f_path)
                     if dur > 0:
                         # Pre-filter large videos if strict mode or Under 1 min mode is on
-                        if ((not skip_merge and duration_mode == 'max') or only_under_1min) and dur >= 60:
+                        if ((not skip_merge and duration_mode == 'max') or only_under_1min) and dur >= 59:
                             continue
                         
                         eff_dur = dur / speed
@@ -181,7 +210,7 @@ class ShortsProcessor:
                     
                     # Check limit for Under 1 min mode
                     if duration_mode == 'max':
-                        if (current_duration + eff_dur) > 60:
+                        if (current_duration + eff_dur) > 59:
                             idx += 1
                             continue
                     
@@ -236,14 +265,14 @@ class ShortsProcessor:
         # Filtering logic for individual videos: Only filter by duration if strictly requested via checkbox
         if only_under_1min:
             if progress_callback:
-                progress_callback(f"🛡️ Bật chế độ lọc nghiêm ngặt (chỉ lấy video < 60s) cho Edit lẻ")
+                progress_callback(f"🛡️ Bật chế độ lọc nghiêm ngặt (chỉ lấy video < 59s) cho Edit lẻ")
             
             for f in files:
                 dur = self.get_video_duration_fast(f)
-                if dur >= 60:
+                if dur >= 59:
                     discarded_videos.append(f)
                     if progress_callback:
-                        progress_callback(f"⏭️ Loại bỏ video >= 60s: {os.path.basename(f)}")
+                        progress_callback(f"⏭️ Loại bỏ video >= 59s: {os.path.basename(f)}")
                 else:
                     video_pool.append(f)
             
@@ -344,17 +373,17 @@ class ShortsProcessor:
         skip_merge = settings.get('skip_merge', False) # Should be false here
         
         if progress_callback and (duration_mode == 'max' or only_under_1min):
-            progress_callback(f"🛡️ Bật chế độ lọc nghiêm ngặt (chỉ lấy video < 60s)")
+            progress_callback(f"🛡️ Bật chế độ lọc nghiêm ngặt (chỉ lấy video < 59s)")
 
         for f in files:
             dur = self.get_video_duration_fast(f)
             # Filter condition: Merge mode with 'max' duration OR explicit strict filter
-            is_too_long = ((not skip_merge and duration_mode == 'max') or only_under_1min) and dur >= 60
+            is_too_long = ((not skip_merge and duration_mode == 'max') or only_under_1min) and dur >= 59
             
             if is_too_long:
                 discarded_videos.append(f)
                 if progress_callback:
-                    progress_callback(f"⏭️ Loại bỏ video >= 60s: {os.path.basename(f)}")
+                    progress_callback(f"⏭️ Loại bỏ video >= 59s: {os.path.basename(f)}")
             else:
                 video_pool.append(f)
         
@@ -391,7 +420,7 @@ class ShortsProcessor:
                     # Check selection limits
                     if duration_mode == 'max':
                         # Mode: Under 1 minute (hard limit 59s)
-                        if (current_duration + eff_dur) > 60:
+                        if (current_duration + eff_dur) > 59:
                             pool_idx += 1
                             continue
                     

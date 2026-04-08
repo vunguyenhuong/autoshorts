@@ -12,11 +12,11 @@ class VideoProcessorThread(QThread):
     progress = pyqtSignal(str) # Log message
     finished = pyqtSignal()
     
-    def __init__(self, tasks, settings):
+    def __init__(self, tasks, settings, processor):
         super().__init__()
         self.tasks = tasks
         self.settings = settings
-        self.processor = ShortsProcessor()
+        self.processor = processor
         self.is_running = True
 
     def run(self):
@@ -55,11 +55,11 @@ class EstimationThread(QThread):
     """Background thread for calculating compilation estimation for multiple tasks"""
     finished = pyqtSignal(list, int)  # (list of (estimated, video_count), total_videos)
     
-    def __init__(self, sources, settings):
+    def __init__(self, sources, settings, processor):
         super().__init__()
         self.sources = sources
         self.settings = settings
-        self.processor = ShortsProcessor()
+        self.processor = processor
     
     def run(self):
         results = []
@@ -202,6 +202,7 @@ class EditorTab(QWidget):
         super().__init__()
         self.processor_thread = None
         self.estimation_thread = None
+        self.processor = ShortsProcessor()
         
         # Overlay Settings
         self.overlay_color = (0, 0, 0)
@@ -337,14 +338,14 @@ class EditorTab(QWidget):
         duration_layout.setContentsMargins(0, 0, 0, 0)
         duration_layout.addWidget(QLabel("Thời lượng video"))
         
-        self.duration_under_1min = QRadioButton("< 1 phút (max 60s)")
+        self.duration_under_1min = QRadioButton("< 1 phút (max 59s)")
         self.duration_under_1min.setChecked(True)
-        self.duration_under_1min.setToolTip("Video tối đa 60s, đảm bảo không vượt quá 1 phút")
+        self.duration_under_1min.setToolTip("Video tối đa 59s")
         self.duration_under_1min.toggled.connect(self.update_estimation_debounced)
         duration_layout.addWidget(self.duration_under_1min)
         
         self.duration_over_1min = QRadioButton("≥ 1 phút (min 60s)")
-        self.duration_over_1min.setToolTip("Video tối thiểu 60s (trên 1 phút)")
+        self.duration_over_1min.setToolTip("Video tối thiểu 60s")
         self.duration_over_1min.toggled.connect(self.update_estimation_debounced)
         duration_layout.addWidget(self.duration_over_1min)
         
@@ -589,7 +590,7 @@ class EditorTab(QWidget):
                 self.log_message.emit(f"Đã chọn màu lớp phủ: RGB{self.overlay_color}")
 
     def get_target_duration(self):
-        return 60 if self.duration_under_1min.isChecked() else 60
+        return 55 if self.duration_under_1min.isChecked() else 60
     
     def get_current_settings(self):
         return {
@@ -642,7 +643,7 @@ class EditorTab(QWidget):
             self._old_threads.append(self.estimation_thread)
             self._old_threads = [t for t in self._old_threads if t.isRunning()]
         
-        self.estimation_thread = EstimationThread(sources, settings)
+        self.estimation_thread = EstimationThread(sources, settings, self.processor)
         self.estimation_thread.finished.connect(self.on_estimation_finished)
         self.estimation_thread.start()
     
@@ -694,7 +695,7 @@ class EditorTab(QWidget):
         self.progress_bar.setValue(0)
         self.progress_bar.setMaximum(0)
         
-        self.processor_thread = VideoProcessorThread(tasks, settings)
+        self.processor_thread = VideoProcessorThread(tasks, settings, self.processor)
         self.processor_thread.progress.connect(self.propagate_log)
         self.processor_thread.finished.connect(self.on_finished)
         self.processor_thread.start()
