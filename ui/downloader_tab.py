@@ -135,42 +135,19 @@ class DownloaderThread(QThread):
 
             self.progress.emit(f"{label} ⬇️ Bắt đầu tải: {url}")
 
-            cmd = [
-                ytdlp_exe, url,
-                '-o', os.path.join(vid_folder, '%(title)s [%(id)s].%(ext)s'),
-                '-f', 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best',
-                '--merge-output-format', 'mp4',
-                '--no-playlist', '--no-warnings',
-                '--extractor-retries', '3',
-                '--retries', '10',
-                '--fragment-retries', '10',
-            ]
-            
-            if ffmpeg_location:
-                cmd.extend(['--ffmpeg-location', ffmpeg_location])
+            import yt_dlp
 
-            startupinfo = None
-            if os.name == 'nt':
-                startupinfo = subprocess.STARTUPINFO()
-                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            # Use the shared proven config from core/downloader.py
+            ydl_opts = self.downloader._build_ydl_opts(vid_folder, ffmpeg_location)
+            ydl_opts['noprogress'] = True
 
-            proc = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True, encoding='utf-8', errors='replace',
-                startupinfo=startupinfo,
-                creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
-            )
-            for line in proc.stdout:
-                if not self.is_running:
-                    proc.kill()
-                    break
-                stripped = line.strip()
-                if stripped:
-                    self.progress.emit(f"{label} {stripped}")
-            proc.wait()
-
-            ok = proc.returncode == 0
+            try:
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    code = ydl.download([url])
+                ok = (code == 0)
+            except Exception as e:
+                self.progress.emit(f"{label} ❌ Error: {str(e)}")
+                ok = False
             if not self.is_running:
                 return False, video
             
@@ -195,7 +172,7 @@ class DownloaderThread(QThread):
                 self.progress.emit(f"{label} ✅ Xong: {actual_new_file}")
                 self.video_downloaded.emit(url)
             else:
-                self.progress.emit(f"{label} ❌ Lỗi tải: {url} (exit={proc.returncode})")
+                self.progress.emit(f"{label} ❌ Lỗi tải: {url}")
                 
             return ok, video
 

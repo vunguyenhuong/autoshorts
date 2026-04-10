@@ -25,6 +25,6 @@ args = [
     '--exclude-module=shiboken6',
 ]
 
-print("🚀 Starting build process...")
+print("Starting build process...")
 PyInstaller.__main__.run(args)
-print("✅ Build complete! Check 'dist' folder.")
+print("Build complete! Check 'dist' folder.")

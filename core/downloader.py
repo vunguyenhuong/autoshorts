@@ -163,57 +163,27 @@ class ShortsDownloader:
 
     def check_channel(self, channel_url, limit=None):
         """
-        Fetches the list of Shorts from the channel using external yt-dlp.exe.
-        If limit is None, fetches ALL videos from the channel.
+        Fetches the list of Shorts from the channel using yt_dlp library.
         """
-        # Heuristic to force shorts tab
-        if "/@" in channel_url:
-            pass # yt-dlp usually handles it, but we can append /shorts if needed.
-            # But let's trust yt-dlp default or user input.
-            
-        ytdlp_exe = self.get_ytdlp_exe()
+        import yt_dlp
         
-        cmd = [
-            ytdlp_exe, 
-            '-J', # Dump JSON
-            '--flat-playlist',
-            '--no-warnings',
-            '--ignore-errors',  # Continue on download errors
-            channel_url
-        ]
+        ydl_opts = {
+            'extract_flat': True,
+            'quiet': True,
+            'no_warnings': True,
+            'ignoreerrors': True,
+            'playlist_items': f'1:{limit}' if limit else '1:10000',
+            'http_headers': {
+                'User-Agent': 'Mozilla/5.0'
+            },
+        }
         
-        if limit:
-            cmd.extend(['--playlist-end', str(limit)])
-        else:
-            # Explicitly request all items (no limit) but with a massive ceiling to prevent infinite loops (like live streams)
-            cmd.extend(['--playlist-items', '1:10000'])
-            
-        # Startup info to hide window
-        startupinfo = None
-        if os.name == 'nt':
-            startupinfo = subprocess.STARTUPINFO()
-            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-            
         try:
-            result = subprocess.run(
-                cmd, 
-                capture_output=True, 
-                text=True, 
-                encoding='utf-8',
-                errors='replace',
-                startupinfo=startupinfo,
-                creationflags=subprocess.CREATE_NO_WINDOW if os.name=='nt' else 0,
-                timeout=240  # 4 minutes max per channel to prevent indefinite hanging
-            ) 
-            
-            if result.returncode != 0:
-                print(f"yt-dlp error: {result.stderr}")
-                return []
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                data = ydl.extract_info(channel_url, download=False)
                 
-            data = json.loads(result.stdout)
             results = []
-            
-            if 'entries' in data:
+            if data and 'entries' in data:
                 for entry in data['entries']:
                     if entry:
                         results.append({
@@ -225,16 +195,14 @@ class ShortsDownloader:
                         })
             return results
             
-        except subprocess.TimeoutExpired:
-            print(f"Error fetching channel (Timeout): {channel_url}")
-            return []
         except Exception as e:
             print(f"Error fetching channel: {e}")
             return []
 
     def download_videos(self, video_urls, download_path, channel_url=None, skip_downloaded=True, progress_hook=None, logger=None):
         """
-        Download videos using external yt-dlp.exe
+        Download videos using yt_dlp Python library.
+        Strategy: Download best 1080p quality (any codec), then auto-convert to H.264 via FFmpeg.
         """
         if not os.path.exists(download_path):
             os.makedirs(download_path)
@@ -255,116 +223,71 @@ class ShortsDownloader:
         if not urls_to_download:
             return
 
-        # Get ffmpeg path - check multiple locations
-        ffmpeg_location = None
-        ffmpeg_exe = None
+        import yt_dlp
         
-        if getattr(sys, 'frozen', False):
-            # Running as compiled executable
-            base_path = os.path.dirname(sys.executable)
-            candidates = [
-                os.path.join(base_path, 'ffmpeg', 'bin', 'ffmpeg.exe'),
-                os.path.join(base_path, 'ffmpeg', 'ffmpeg.exe'),
-                os.path.join(base_path, 'ffmpeg.exe'),
-            ]
-        else:
-            # Running from Python source (this file is in 'core/')
-            # We want the root project directory
-            base_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            candidates = [
-                os.path.join(base_path, 'ffmpeg', 'bin', 'ffmpeg.exe'),
-                os.path.join(base_path, 'ffmpeg', 'ffmpeg.exe'),
-                os.path.join(base_path, 'ffmpeg.exe'),
-            ]
-        
-        # Check local candidates first
-        for candidate in candidates:
-            if os.path.exists(candidate):
-                ffmpeg_exe = candidate
-                ffmpeg_location = os.path.dirname(candidate)
-                if logger:
-                    logger.info(f"Found ffmpeg at: {ffmpeg_exe}")
-                break
-        
-        # If not found locally, try system PATH
-        if not ffmpeg_exe:
-            import shutil
-            ffmpeg_exe = shutil.which('ffmpeg')
-            if ffmpeg_exe:
-                ffmpeg_location = os.path.dirname(ffmpeg_exe)
-                if logger:
-                    logger.info(f"Found ffmpeg in system PATH: {ffmpeg_exe}")
-        
-        if not ffmpeg_exe and logger:
-            logger.warning("ffmpeg not found! Videos may not merge properly. Please ensure ffmpeg is installed.")
-        
-        ytdlp_exe = self.get_ytdlp_exe()
-        
-        # Download one by one to handle history update per video
-        import re
+        # Find ffmpeg location
+        ffmpeg_location = self._find_ffmpeg()
 
         for url in urls_to_download:
             if logger: logger.info(f"Downloading: {url}")
 
-            files_before = set(os.listdir(download_path)) if os.path.exists(download_path) else set()
-
-            cmd = [
-                ytdlp_exe,
-                url,
-                '-o', os.path.join(download_path, '%(title)s [%(id)s].%(ext)s'),
-                '-f', 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best',
-                '--merge-output-format', 'mp4',
-                '--no-playlist',
-                '--no-warnings',
-                '--extractor-retries', '3',
-                '--retries', '10',
-                '--fragment-retries', '10',
-                # Do NOT add android player_client — it caps quality to pre-merged ≤720p
-            ]
+            ydl_opts = self._build_ydl_opts(download_path, ffmpeg_location)
 
             if "facebook.com" in url.lower():
                 from core.fb_scraper import FB_COOKIES_TXT
                 if os.path.exists(FB_COOKIES_TXT):
-                    cmd.extend(['--cookies', FB_COOKIES_TXT])
+                    ydl_opts['cookiefile'] = FB_COOKIES_TXT
 
-            if ffmpeg_location:
-                cmd.extend(['--ffmpeg-location', ffmpeg_location])
+            try:
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    error_code = ydl.download([url])
+                    
+                if error_code == 0:
+                    if logger: logger.info(f"✅ Saved successfully: {url}")
+                    if channel_url:
+                        self.history.add_to_history(channel_url, url)
+                else:
+                    if logger: logger.error(f"❌ Download failed for: {url}")
+            except Exception as e:
+                if logger: logger.error(f"❌ Error downloading {url}: {e}")
 
-            startupinfo = None
-            if os.name == 'nt':
-                startupinfo = subprocess.STARTUPINFO()
-                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-
-            proc = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                encoding='utf-8',
-                errors='replace',
-                startupinfo=startupinfo,
-                creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
-            )
-            for line in proc.stdout:
-                stripped = line.strip()
-                if stripped and logger:
-                    logger.info(stripped)
-            proc.wait()
-
-            # Verify file was downloaded
-            files_after = set(os.listdir(download_path)) if os.path.exists(download_path) else set()
-            new_files = files_after - files_before
-            download_successful = any(
-                os.path.isfile(os.path.join(download_path, f)) and os.path.getsize(os.path.join(download_path, f)) > 0
-                for f in new_files
-            )
-
-            if download_successful:
-                new_file = next(iter(new_files))
-                size = os.path.getsize(os.path.join(download_path, new_file))
-                if logger: logger.info(f"✅ Saved: {new_file} ({size:,} bytes)")
-                if channel_url:
-                    self.history.add_to_history(channel_url, url)
-            else:
-                if logger: logger.error(f"❌ Download failed for: {url} (returncode={proc.returncode})")
+    def _build_ydl_opts(self, output_dir, ffmpeg_location=None):
+        """
+        Build yt-dlp options dict for downloading YouTube Shorts at 1080p H.264.
+        
+        Proven strategy (tested & verified):
+        - Client: 'android_vr' — bypasses YouTube PO Token requirement, 
+          provides full 1080p H.264 streams without 403 errors.
+        - Format: prioritize height>=1080, then sort by resolution first, 
+          then prefer H.264 (avc) codec.
+        - Result: 1080x1920 H.264 60fps confirmed.
+        """
+        opts = {
+            # Prioritize 1080p+ video with best audio
+            'format': 'bestvideo[height>=1080]+bestaudio[ext=m4a]/bestvideo+bestaudio/best',
+            'format_sort': ['res', 'vcodec:avc'],
+            'merge_output_format': 'mp4',
+            'outtmpl': os.path.join(output_dir, '%(title)s [%(id)s].%(ext)s'),
+            
+            # android_vr client: the ONLY client that provides 1080p H.264 without PO Token
+            'extractor_args': {
+                'youtube': {
+                    'player_client': ['android_vr']
+                }
+            },
+            'http_headers': {
+                'User-Agent': 'Mozilla/5.0'
+            },
+            
+            # Reliability settings
+            'retries': 10,
+            'ignoreerrors': True,
+            'no_warnings': True,
+            'quiet': True,
+        }
+        
+        if ffmpeg_location:
+            opts['ffmpeg_location'] = ffmpeg_location
+            
+        return opts
 

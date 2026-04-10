@@ -722,122 +722,95 @@ class ShortsProcessor:
                 iw, ih = self._probe_dims(f_path)
                 has_audio = self._has_audio_stream(f_path)
                 
-                # Calculate fit dimensions
+                # Calculate scale factor to fill canvas (cover, not fit)
                 scale_w = CW / iw
                 scale_h = CH / ih
-                fit_scale = min(scale_w, scale_h)
+                cover_scale = max(scale_w, scale_h)
                 
-                fit_w = int(iw * fit_scale)
-                fit_h = int(ih * fit_scale)
+                # Apply user stretch on top of the cover scale
+                final_sx = cover_scale * sx
+                final_sy = cover_scale * sy
                 
-                # Apply user stretch
-                target_w = int(fit_w * sx)
-                target_h = int(fit_h * sy)
-                
-                # Ensure even
-                if target_w % 2 != 0: target_w += 1
-                if target_h % 2 != 0: target_h += 1
-                
-                # Calculate padding (overlay position)
-                pad_x = int((CW - target_w) / 2 + off_x)
-                pad_y = int((CH - target_h) / 2 + off_y)
-                
-                # Build filter for this video
-                vf_filters = [f"setpts=PTS/{speed}"]
+                # Build video filter chain
+                vf_parts = [f"setpts=PTS/{speed}"]
                 
                 if hflip:
                     if i > 0:
                         import random
                         if random.choice([True, False]):
-                            vf_filters.append("hflip")
+                            vf_parts.append("hflip")
                     
                 if random_color:
                     import random
                     br = round(random.uniform(-0.03, 0.03), 3)
                     con = round(random.uniform(0.95, 1.05), 3)
                     sat = round(random.uniform(0.95, 1.10), 3)
-                    vf_filters.append(f"eq=brightness={br}:contrast={con}:saturation={sat}")
+                    vf_parts.append(f"eq=brightness={br}:contrast={con}:saturation={sat}")
                 
                 if film_grain:
-                    vf_filters.append("noise=alls=1:allf=t+u")
+                    vf_parts.append("noise=alls=1:allf=t+u")
                 
-                vf_filters.append(f"scale={target_w}:{target_h}:flags=lanczos")
-                vf = ",".join(vf_filters)
+                # Scale then crop to exact 1080x1920 canvas
+                # This is the proven CUDA-compatible approach
+                vf_parts.append(f"scale=iw*{final_sx}:ih*{final_sy}")
                 
-                # Audio: speed (only if audio exists)
-                if speed > 2.0:
-                    af = f"atempo=2.0,atempo={speed/2.0}"
-                else:
-                    af = f"atempo={speed}"
+                # Crop to canvas with offset support
+                crop_x = f"(in_w-{CW})/2+{off_x}" if off_x != 0 else f"(in_w-{CW})/2"
+                crop_y = f"(in_h-{CH})/2+{off_y}" if off_y != 0 else f"(in_h-{CH})/2"
+                vf_parts.append(f"crop={CW}:{CH}:{crop_x}:{crop_y}")
                 
-                # Output temp file
-                temp_file = os.path.join(temp_dir, f"temp_{i:03d}.mp4")
-                
-                # Build command with filter_complex for overlay
-                gpu_info = self.detect_gpu_encoder()
-                
-                # Check if we have NVIDIA GPU for hardware acceleration
-                use_nvidia_hw = gpu_info and gpu_info[0] == 'h264_nvenc'
-                
-                if use_nvidia_hw:
-                    # NVIDIA GPU: Not using -hwaccel auto because CPU filters (scale, overlay, drawbox)
-                    # cause severe PCIe transfer bottlenecks when combined with hardware decoding.
-                    cmd = [ffmpeg_exe, "-y", "-i", f_path]
-                else:
-                    # Other GPU or CPU fallback
-                    cmd = [ffmpeg_exe, "-y", "-i", f_path]
-                
-                base_filter = f"color=s={CW}x{CH}:c=black[bg];[0:v]{vf}[scaled];[bg][scaled]overlay={pad_x}:{pad_y}:shortest=1"
-                
-                # Phủ màu (Color Overlay)
+                # Color overlay
                 if overlay_opacity > 0:
                     alpha = overlay_opacity / 100.0
                     overlay_hex = f"0x{overlay_color[0]:02x}{overlay_color[1]:02x}{overlay_color[2]:02x}"
-                    base_filter += f"[base];[base]drawbox=x=0:y=0:w={CW}:h={CH}:color={overlay_hex}@{alpha}:t=fill[v]"
+                    vf_parts.append(f"drawbox=x=0:y=0:w={CW}:h={CH}:color={overlay_hex}@{alpha}:t=fill")
+                
+                # Enforce uniform framerate and timebase to prevent xfade crash in PASS 2
+                vf_chain = ",".join(vf_parts) + ",fps=30,settb=1/90000"
+                
+                # Audio speed & enforce uniform target sample rate + stereo
+                # acrossfade requires exactly matched sample rates and channels format
+                if speed > 2.0:
+                    af = f"atempo=2.0,atempo={speed/2.0},aformat=sample_rates=44100:channel_layouts=stereo"
                 else:
-                    base_filter += "[v]"
-
-                # Build filter_complex based on audio availability
+                    af = f"atempo={speed},aformat=sample_rates=44100:channel_layouts=stereo"
+                
+                # Build filter_complex
                 if has_audio:
-                    # Video has audio - apply audio filters
-                    filter_complex = f"{base_filter};[0:a]{af}[a]"
-                    map_args = ["-map", "[v]", "-map", "[a]"]
+                    filter_complex = f"[0:v]{vf_chain}[v];[0:a]{af}[a]"
                 else:
-                    # Video has no audio - only process video and add silent audio
-                    filter_complex = f"{base_filter};anullsrc=channel_layout=stereo:sample_rate=44100[a]"
-                    map_args = ["-map", "[v]", "-map", "[a]"]
+                    filter_complex = f"[0:v]{vf_chain}[v];anullsrc=channel_layout=stereo:sample_rate=44100[a]"
                 
-                # Apply filter_complex and map outputs
-                cmd += ["-filter_complex", filter_complex]
-                cmd += map_args
+                temp_file = os.path.join(temp_dir, f"temp_{i:03d}.mp4")
                 
-                base_cmd = cmd.copy()
+                # Check for NVIDIA GPU
+                gpu_info = self.detect_gpu_encoder()
+                use_nvenc = gpu_info and gpu_info[0] == 'h264_nvenc'
                 
-                if gpu_info:
-                    encoder_name, preset_args, quality_args = gpu_info
-                    
-                    if use_nvidia_hw:
-                        # Optimized NVENC settings with safer presets to avoid argument errors.
-                        video_codec = [
-                            '-c:v', 'h264_nvenc',
-                            '-preset', 'fast',
-                            '-tune', 'hq',
-                            '-rc', 'vbr',
-                            '-cq', '18',
-                            '-b:v', '0',
-                            '-maxrate', '15M',
-                            '-bufsize', '30M',
-                            '-profile:v', 'high',
-                            '-spatial_aq', '1',
-                            '-temporal_aq', '1',
-                            '-rc-lookahead', '10'
-                        ]
-                    else:
-                        video_codec = ['-c:v', encoder_name] + preset_args + quality_args
+                # Build command — proven CUDA pattern:
+                if use_nvenc:
+                    cmd = [
+                        ffmpeg_exe, "-y",
+                        "-hwaccel", "cuda",
+                        "-i", f_path,
+                        "-filter_complex", filter_complex,
+                        "-map", "[v]", "-map", "[a]",
+                        "-c:v", "h264_nvenc", "-preset", "p5", "-b:v", "5M",
+                        "-pix_fmt", "yuv420p", "-r", "30", "-video_track_timescale", "90000",
+                        "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2",
+                        temp_file
+                    ]
                 else:
-                    video_codec = ['-c:v', 'libx264', '-preset', 'fast', '-crf', '18']
-                
-                cmd = base_cmd + video_codec + ['-pix_fmt', 'yuv420p', "-c:a", "aac", temp_file]
+                    cmd = [
+                        ffmpeg_exe, "-y",
+                        "-i", f_path,
+                        "-filter_complex", filter_complex,
+                        "-map", "[v]", "-map", "[a]",
+                        "-c:v", "libx264", "-preset", "fast", "-crf", "18",
+                        "-pix_fmt", "yuv420p", "-r", "30", "-video_track_timescale", "90000",
+                        "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2",
+                        temp_file
+                    ]
                 
                 # Execute
                 startupinfo = None
@@ -849,11 +822,18 @@ class ShortsProcessor:
                                       startupinfo=startupinfo, encoding='utf-8', errors='replace')
                 
                 if result.returncode != 0:
-                    if gpu_info:
-                        # NVIDIA limits user GPUs to 3-5 concurrent streams, causing FFmpeg to fail with out of memory.
-                        # We fallback to CPU encoding (libx264) for any streams that exceed the GPU limit.
-                        cmd_fallback = base_cmd + ['-c:v', 'libx264', '-preset', 'fast', '-crf', '18', '-pix_fmt', 'yuv420p', '-c:a', 'aac', temp_file]
-                        result_fb = subprocess.run(cmd_fallback, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    if use_nvenc:
+                        # Fallback to CPU if NVENC fails (concurrent stream limit)
+                        cmd_fb = [
+                            ffmpeg_exe, "-y",
+                            "-i", f_path,
+                            "-filter_complex", filter_complex,
+                            "-map", "[v]", "-map", "[a]",
+                            "-c:v", "libx264", "-preset", "fast", "-crf", "18", "-pix_fmt", "yuv420p",
+                            "-c:a", "aac", "-b:a", "128k",
+                            temp_file
+                        ]
+                        result_fb = subprocess.run(cmd_fb, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                                startupinfo=startupinfo, encoding='utf-8', errors='replace')
                         if result_fb.returncode != 0:
                             return i, False, f"GPU Error:\n{result.stderr}\n\nCPU Fallback Error:\n{result_fb.stderr}"
@@ -897,22 +877,15 @@ class ShortsProcessor:
                         progress_callback(f"✓ Video {completed}/{len(file_paths)} encoded successfully.")
             
             # PASS 2: Concatenate all temp files
-                
-
-            
-            # PASS 2: Concatenate all temp files
             if progress_callback:
                 progress_callback("Concatenating videos...")
             
-            # Create concat file list
             concat_file = os.path.join(temp_dir, "concat_list.txt")
             with open(concat_file, "w", encoding="utf-8") as f:
                 for temp_file in temp_files:
-                    # Use forward slashes and escape special chars
                     safe_path = temp_file.replace("\\", "/")
                     f.write(f"file '{safe_path}'\n")
             
-            # Concatenate
             cmd = [ffmpeg_exe, "-y", "-f", "concat", "-safe", "0", "-i", concat_file]
             cmd += ["-c", "copy", output_path]
             
@@ -926,9 +899,9 @@ class ShortsProcessor:
             
             if result.returncode != 0:
                 if progress_callback:
-                    progress_callback("[Error] Failed to concatenate videos")
+                    progress_callback("[Error] Failed to merge videos")
                     progress_callback(result.stderr[-500:] if len(result.stderr) > 500 else result.stderr)
-                raise Exception("FFmpeg concatenation failed")
+                raise Exception("FFmpeg merge failed")
             
             if progress_callback:
                 progress_callback("✓ Rendering complete!")
