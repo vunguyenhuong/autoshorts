@@ -1,7 +1,7 @@
 import os
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, QPushButton, 
-    QLabel, QProgressBar, QSpinBox, QFileDialog, QGroupBox, QMessageBox, QCheckBox, QTextEdit, QScrollArea, QSizePolicy
+    QLabel, QProgressBar, QSpinBox, QFileDialog, QGroupBox, QMessageBox, QCheckBox, QTextEdit, QScrollArea, QSizePolicy, QComboBox
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from core.downloader import ShortsDownloader
@@ -20,6 +20,26 @@ class FetcherThread(QThread):
     def stop(self):
         self.is_running = False
 
+    def _adjust_channel_url(self, url, content_type):
+        """
+        Auto-adjust channel URL to point to the correct content type.
+        E.g. if content_type='videos', ensure URL ends with /videos instead of /shorts.
+        """
+        import re
+        # Strip trailing slash
+        url = url.rstrip('/')
+        
+        # Remove existing /shorts or /videos suffix
+        url = re.sub(r'/(shorts|videos)$', '', url)
+        
+        # Append the correct suffix
+        if content_type == 'videos':
+            url += '/videos'
+        else:
+            url += '/shorts'
+        
+        return url
+
     def run(self):
         try:
             from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -27,8 +47,18 @@ class FetcherThread(QThread):
             all_videos = []
             flat_tasks = []
             for t in self.tasks:
+                content_type = t.get('content_type', 'shorts')
                 for url in t['urls']:
-                    flat_tasks.append({'url': url.strip(), 'limit': t['limit'], 'folder': t['folder'], 'task_id': t.get('task_id', 0)})
+                    # Auto-adjust URL based on content type
+                    adjusted_url = self._adjust_channel_url(url.strip(), content_type)
+                    flat_tasks.append({
+                        'url': adjusted_url, 
+                        'original_url': url.strip(),
+                        'limit': t['limit'], 
+                        'folder': t['folder'], 
+                        'task_id': t.get('task_id', 0),
+                        'content_type': content_type
+                    })
             
             total_channels = len(flat_tasks)
             self.current_channel_count = 0
@@ -37,13 +67,15 @@ class FetcherThread(QThread):
                 url = task['url']
                 limit = task['limit']
                 folder = task['folder']
+                content_type = task.get('content_type', 'shorts')
                 
                 # Extract channel name for cleaner display
                 display_name = url.split('/')[-1] if '/' in url else url
-                if display_name.lower() == 'shorts' or display_name.lower() == 'reels':
+                if display_name.lower() in ('shorts', 'reels', 'videos'):
                     display_name = url.split('/')[-2] if len(url.split('/')) > 1 else url
-                    
-                self.progress.emit(f"⏳ Đang kiểm tra {display_name}...")
+                
+                type_label = "📹 Videos" if content_type == 'videos' else "📱 Shorts"
+                self.progress.emit(f"⏳ [{type_label}] Đang kiểm tra {display_name}...")
                 
                 # Each thread needs its own downloader instance to prevent potential issues
                 thread_downloader = ShortsDownloader()
@@ -55,6 +87,7 @@ class FetcherThread(QThread):
                     v['folder'] = folder
                     v['task_id'] = task['task_id']
                     v['limit'] = task['limit']
+                    v['content_type'] = content_type
                     
                 return display_name, videos
 
@@ -112,6 +145,7 @@ class DownloaderThread(QThread):
         successful = [0]
         failed = [0]
         permanently_failed = [0]
+        failed_urls = []
 
         # Resolve paths once
         ffmpeg_location = self.downloader._find_ffmpeg()
@@ -141,6 +175,20 @@ class DownloaderThread(QThread):
             ydl_opts = self.downloader._build_ydl_opts(vid_folder, ffmpeg_location)
             ydl_opts['noprogress'] = True
 
+            content_type = video.get('content_type', 'shorts')
+            def resolution_filter(info, *, incomplete):
+                width = info.get('width')
+                height = info.get('height')
+                # Only check if resolution is fully extracted
+                if width and height:
+                    if content_type == 'videos' and width < height:
+                        return f"Bỏ qua (không phải video ngang): {width}x{height}"
+                    elif content_type == 'shorts' and width > height:
+                        return f"Bỏ qua (không phải video dọc): {width}x{height}"
+                return None
+                
+            ydl_opts['match_filter'] = resolution_filter
+
             try:
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                     code = ydl.download([url])
@@ -162,6 +210,41 @@ class DownloaderThread(QThread):
                 if actual_new_file == 'unknown':
                     ok = False
 
+            # --- Rename file to clean title ---
+            if ok and actual_new_file != 'unknown':
+                try:
+                    import re
+                    # Remove the ID part completely
+                    base_name, ext = os.path.splitext(actual_new_file)
+                    new_base_name = base_name.replace(f" [{vid_id}]", "").replace(f"[{vid_id}]", "")
+                    
+                    # Remove emojis and weird symbols, leave letters (including unicode/vietnamese), numbers, spaces, and basic punctuation
+                    new_base_name = re.sub(r'[^\w\s\-.,!?()\[\]]', '', new_base_name)
+                    # Clean up multiple spaces
+                    new_base_name = re.sub(r'\s+', ' ', new_base_name).strip()
+                    
+                    if not new_base_name:
+                        new_base_name = vid_id  # Fallback just in case title consisted only of emojis
+                        
+                    new_name = new_base_name + ext
+                    final_name = new_name
+                    counter = 1
+                    
+                    old_path = os.path.join(vid_folder, actual_new_file)
+                    new_path = os.path.join(vid_folder, final_name)
+                    
+                    # Prevent overwrites if the file already exists
+                    while os.path.exists(new_path) and new_path != old_path:
+                        final_name = f"{new_base_name} ({counter}){ext}"
+                        new_path = os.path.join(vid_folder, final_name)
+                        counter += 1
+                        
+                    if old_path != new_path:
+                        os.rename(old_path, new_path)
+                        actual_new_file = final_name
+                except Exception as e:
+                    pass # Safely ignore renaming errors and continue with old name
+
             if ok and channel_url:
                 with lock:
                     self.downloader.history.add_to_history(
@@ -173,6 +256,8 @@ class DownloaderThread(QThread):
                 self.video_downloaded.emit(url)
             else:
                 self.progress.emit(f"{label} ❌ Lỗi tải: {url}")
+                with lock:
+                    failed_urls.append(url)
                 
             return ok, video
 
@@ -241,6 +326,29 @@ class DownloaderThread(QThread):
             if self.total_target > 0:
                 self.percent.emit(100)
                 
+            if failed_urls:
+                try:
+                    import sys
+                    from datetime import datetime
+                    if getattr(sys, 'frozen', False):
+                        base_dir = os.path.dirname(sys.executable)
+                    else:
+                        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                    
+                    errorlink_dir = os.path.join(base_dir, "errorlink")
+                    os.makedirs(errorlink_dir, exist_ok=True)
+                    
+                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    error_file = os.path.join(errorlink_dir, f"error_{timestamp}.txt")
+                    
+                    with open(error_file, "w", encoding="utf-8") as f:
+                        for furl in set(failed_urls):
+                            f.write(furl + "\n")
+                            
+                    self.progress.emit(f"📝 Đã xuất {len(set(failed_urls))} link lỗi ra: errorlink/error_{timestamp}.txt")
+                except Exception as e:
+                    self.progress.emit(f"❌ Lỗi ghi file errorlink: {e}")
+                
         except Exception as e:
             self.progress.emit(f"Lỗi nghiêm trọng: {str(e)}")
 
@@ -273,11 +381,21 @@ class DownloadTaskWidget(QGroupBox):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 15, 10, 10)
         
+        # Content Type Selector Row
+        type_row = QHBoxLayout()
+        type_row.addWidget(QLabel("Loại nội dung:"))
+        self.content_type_cmb = QComboBox()
+        self.content_type_cmb.addItems(["Shorts", "Videos (dài)"])
+        self.content_type_cmb.setFixedWidth(140)
+        self.content_type_cmb.setToolTip("Chọn loại video muốn tải: Shorts (video ngắn) hoặc Videos (video dài)")
+        self.content_type_cmb.currentIndexChanged.connect(self._on_content_type_changed)
+        type_row.addWidget(self.content_type_cmb)
+        type_row.addStretch()
+        layout.addLayout(type_row)
+        
         # URL Input
         self.url_input = QTextEdit()
-        self.url_input.setPlaceholderText(
-            "Nhập URL kênh YouTube (mỗi dòng một kênh)\nVí dụ:\nhttps://www.youtube.com/@ChannelA/shorts"
-        )
+        self._update_placeholder()
         self.url_input.setMaximumHeight(80)
         self.url_input.setMinimumHeight(60)
         layout.addWidget(self.url_input)
@@ -286,7 +404,8 @@ class DownloadTaskWidget(QGroupBox):
         row1 = QHBoxLayout()
         row1.addWidget(QLabel("Download Top:"))
         self.limit_spin = QSpinBox()
-        self.limit_spin.setRange(1, 999)
+        self.limit_spin.setRange(1, 999999)
+        self.limit_spin.setSpecialValueText("0 (Tất cả)")
         self.limit_spin.setValue(50)
         self.limit_spin.setSuffix(" videos")
         row1.addWidget(self.limit_spin)
@@ -315,6 +434,19 @@ class DownloadTaskWidget(QGroupBox):
             
         layout.addLayout(row1)
 
+    def _on_content_type_changed(self):
+        self._update_placeholder()
+    
+    def _update_placeholder(self):
+        if self.content_type_cmb.currentText() == "Shorts":
+            self.url_input.setPlaceholderText(
+                "Nhập URL kênh YouTube (mỗi dòng một kênh)\nVí dụ:\nhttps://www.youtube.com/@vunguyenhuong/shorts"
+            )
+        else:
+            self.url_input.setPlaceholderText(
+                "Nhập URL kênh YouTube (mỗi dòng một kênh)\nVí dụ:\nhttps://www.youtube.com/@vunguyenhuong/videos"
+            )
+    
     def browse_folder(self):
         folder = QFileDialog.getExistingDirectory(self, "Select Download Directory")
         if folder:
@@ -323,10 +455,12 @@ class DownloadTaskWidget(QGroupBox):
     def get_data(self):
         text = self.url_input.toPlainText()
         urls = [line.strip() for line in text.split('\n') if line.strip()]
+        content_type = "shorts" if self.content_type_cmb.currentText() == "Shorts" else "videos"
         return {
             'urls': urls,
             'limit': self.limit_spin.value(),
-            'folder': self.folder_input.text()
+            'folder': self.folder_input.text(),
+            'content_type': content_type
         }
 
     def set_data(self, data):
@@ -336,12 +470,18 @@ class DownloadTaskWidget(QGroupBox):
             self.limit_spin.setValue(data['limit'])
         if 'folder' in data:
             self.folder_input.setText(data['folder'])
+        if 'content_type' in data:
+            if data['content_type'] == 'videos':
+                self.content_type_cmb.setCurrentText("Videos (dài)")
+            else:
+                self.content_type_cmb.setCurrentText("Shorts")
 
     def set_enabled(self, enabled):
         self.url_input.setEnabled(enabled)
         self.limit_spin.setEnabled(enabled)
         self.folder_input.setEnabled(enabled)
         self.browse_btn.setEnabled(enabled)
+        self.content_type_cmb.setEnabled(enabled)
         if hasattr(self, 'remove_btn'):
             self.remove_btn.setEnabled(enabled)
 
@@ -679,7 +819,10 @@ class DownloaderTab(QWidget):
         for tid, vids in videos_by_task.items():
             task_limit = vids[0].get('limit', 50)
             random.shuffle(vids) # Tự trộn tất cả video có sẵn của Tác vụ này vào 1 Biển dự phòng ngẫu nhiên
-            target = min(len(vids), task_limit)
+            if task_limit <= 0:
+                target = len(vids)
+            else:
+                target = min(len(vids), task_limit)
             tasks_specs[tid] = {
                 'limit': task_limit,
                 'target': target,

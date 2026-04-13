@@ -106,9 +106,11 @@ class DownloadHistory:
         """Normalize URL for consistent comparison"""
         # Remove trailing slashes and convert to lowercase
         normalized = url.rstrip('/').lower()
-        # Remove /shorts suffix to treat @channel and @channel/shorts as same
+        # Remove /shorts or /videos suffix to treat @channel, @channel/shorts, @channel/videos as same
         if normalized.endswith('/shorts'):
             normalized = normalized[:-7]  # Remove '/shorts'
+        elif normalized.endswith('/videos'):
+            normalized = normalized[:-7]  # Remove '/videos'
         return normalized
 
 class ShortsDownloader:
@@ -172,12 +174,14 @@ class ShortsDownloader:
             'quiet': True,
             'no_warnings': True,
             'ignoreerrors': True,
-            'playlist_items': f'1:{limit}' if limit else '1:10000',
             'http_headers': {
                 'User-Agent': 'Mozilla/5.0'
             },
         }
-        
+
+        if limit and limit > 0:
+            ydl_opts['playlistend'] = limit
+            
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 data = ydl.extract_info(channel_url, download=False)
@@ -285,7 +289,7 @@ class ShortsDownloader:
             'no_warnings': True,
             'quiet': True,
         }
-        
+
         if ffmpeg_location:
             opts['ffmpeg_location'] = ffmpeg_location
             

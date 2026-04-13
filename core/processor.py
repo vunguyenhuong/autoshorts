@@ -722,16 +722,29 @@ class ShortsProcessor:
                 iw, ih = self._probe_dims(f_path)
                 has_audio = self._has_audio_stream(f_path)
                 
-                # Calculate scale factor to fill canvas (cover, not fit)
-                scale_w = CW / iw
-                scale_h = CH / ih
-                cover_scale = max(scale_w, scale_h)
+                # Calculate scale factor to FIT video into canvas (like autocut)
+                # Fit: scale down so the entire video fits inside the canvas
+                max_width = CW  # 1080
+                if iw > max_width:
+                    fit_scale = max_width / iw
+                    fit_width = max_width
+                    fit_height = int(ih * fit_scale)
+                else:
+                    fit_width = iw
+                    fit_height = ih
                 
-                # Apply user stretch on top of the cover scale
-                final_sx = cover_scale * sx
-                final_sy = cover_scale * sy
+                # Apply user stretch (scale_x, scale_y) on top of the fit size
+                scaled_width = int(fit_width * sx)
+                scaled_height = int(fit_height * sy)
                 
-                # Build video filter chain
+                # Calculate overlay position (center on canvas, with offset)
+                overlay_x = (CW - scaled_width) // 2 + off_x
+                overlay_y = (CH - scaled_height) // 2 + off_y
+                
+                # Background color hex
+                bg_hex = f"0x{overlay_color[0]:02x}{overlay_color[1]:02x}{overlay_color[2]:02x}" if overlay_opacity > 0 else "0xf0f0f0"
+                
+                # Build video filter parts for the source video
                 vf_parts = [f"setpts=PTS/{speed}"]
                 
                 if hflip:
@@ -750,36 +763,39 @@ class ShortsProcessor:
                 if film_grain:
                     vf_parts.append("noise=alls=1:allf=t+u")
                 
-                # Scale then crop to exact 1080x1920 canvas
-                # This is the proven CUDA-compatible approach
-                vf_parts.append(f"scale=iw*{final_sx}:ih*{final_sy}")
+                # Scale video to fit size (like autocut: scale → place on background)
+                vf_parts.append(f"scale={scaled_width}:{scaled_height}:flags=lanczos")
                 
-                # Crop to canvas with offset support
-                crop_x = f"(in_w-{CW})/2+{off_x}" if off_x != 0 else f"(in_w-{CW})/2"
-                crop_y = f"(in_h-{CH})/2+{off_y}" if off_y != 0 else f"(in_h-{CH})/2"
-                vf_parts.append(f"crop={CW}:{CH}:{crop_x}:{crop_y}")
+                vf_chain = ",".join(vf_parts)
                 
-                # Color overlay
+                # Build filter_complex: create background → overlay scaled video on it
+                # This matches autocut's approach: color background + overlay
+                filter_parts = []
+                filter_parts.append(f"[0:v]{vf_chain}[scaled]")
+                filter_parts.append(f"color=c={bg_hex}:s={CW}x{CH}:r=30[bg]")
+                filter_parts.append(f"[bg][scaled]overlay={overlay_x}:{overlay_y}:shortest=1[base]")
+                
+                # Color overlay on top if opacity > 0
                 if overlay_opacity > 0:
                     alpha = overlay_opacity / 100.0
-                    overlay_hex = f"0x{overlay_color[0]:02x}{overlay_color[1]:02x}{overlay_color[2]:02x}"
-                    vf_parts.append(f"drawbox=x=0:y=0:w={CW}:h={CH}:color={overlay_hex}@{alpha}:t=fill")
-                
-                # Enforce uniform framerate and timebase to prevent xfade crash in PASS 2
-                vf_chain = ",".join(vf_parts) + ",fps=30,settb=1/90000"
+                    overlay_hex_color = f"0x{overlay_color[0]:02x}{overlay_color[1]:02x}{overlay_color[2]:02x}"
+                    filter_parts.append(f"[base]drawbox=x=0:y=0:w={CW}:h={CH}:color={overlay_hex_color}@{alpha}:t=fill,fps=30,settb=1/90000[v]")
+                else:
+                    filter_parts.append(f"[base]fps=30,settb=1/90000[v]")
                 
                 # Audio speed & enforce uniform target sample rate + stereo
-                # acrossfade requires exactly matched sample rates and channels format
                 if speed > 2.0:
                     af = f"atempo=2.0,atempo={speed/2.0},aformat=sample_rates=44100:channel_layouts=stereo"
                 else:
                     af = f"atempo={speed},aformat=sample_rates=44100:channel_layouts=stereo"
                 
-                # Build filter_complex
+                # Add audio filter
                 if has_audio:
-                    filter_complex = f"[0:v]{vf_chain}[v];[0:a]{af}[a]"
+                    filter_parts.append(f"[0:a]{af}[a]")
                 else:
-                    filter_complex = f"[0:v]{vf_chain}[v];anullsrc=channel_layout=stereo:sample_rate=44100[a]"
+                    filter_parts.append(f"anullsrc=channel_layout=stereo:sample_rate=44100[a]")
+                
+                filter_complex = ";".join(filter_parts)
                 
                 temp_file = os.path.join(temp_dir, f"temp_{i:03d}.mp4")
                 

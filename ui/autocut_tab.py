@@ -105,6 +105,7 @@ class PreviewPopup(QWidget):
 class VideoItemWidget(QFrame):
     preview_requested = pyqtSignal(str, float)
     title_changed = pyqtSignal()
+    stats_changed = pyqtSignal()
 
     def __init__(self, path, original_duration, parent=None):
         super().__init__(parent)
@@ -198,6 +199,7 @@ class VideoItemWidget(QFrame):
         self.cut_start.setTime(QTime(0, 0, 0))
         self.cut_start.setFixedWidth(80)
         self.cut_start.setStyleSheet("QTimeEdit { border: 1px solid #cbd5e1; border-radius: 4px; padding: 3px; background-color: white; }")
+        self.cut_start.timeChanged.connect(lambda: self.stats_changed.emit())
         cut_layout.addWidget(self.cut_start)
 
         to_label = QLabel(" đến ")
@@ -212,6 +214,7 @@ class VideoItemWidget(QFrame):
         self.cut_end.setTime(QTime(h, m, s))
         self.cut_end.setFixedWidth(80)
         self.cut_end.setStyleSheet("QTimeEdit { border: 1px solid #cbd5e1; border-radius: 4px; padding: 3px; background-color: white; }")
+        self.cut_end.timeChanged.connect(lambda: self.stats_changed.emit())
         cut_layout.addWidget(self.cut_end)
         
         cut_layout.addStretch() # Prevents stretching
@@ -256,13 +259,22 @@ class VideoItemWidget(QFrame):
         self.skip_container.addWidget(self.skip_placeholder)
 
         main_layout.addWidget(self.skip_container_widget)
+        
+        # Stats summary label
+        self.stats_label = QLabel()
+        self.stats_label.setStyleSheet("color: #0284c7; font-size: 11px; font-weight: bold; background-color: #f0f9ff; padding: 4px 8px; border-radius: 4px;")
+        self.stats_label.hide()
+        main_layout.addWidget(self.stats_label)
 
     def add_skip_range(self):
         self.skip_placeholder.setVisible(False)
         skip_widget = SkipRangeWidget(len(self.skip_widgets))
         skip_widget.removed.connect(self.remove_skip_range)
+        if hasattr(skip_widget, 'time_changed'):
+            skip_widget.time_changed.connect(lambda: self.stats_changed.emit())
         self.skip_container.addWidget(skip_widget)
         self.skip_widgets.append(skip_widget)
+        self.stats_changed.emit()
         
     def remove_skip_range(self, widget):
         self.skip_container.removeWidget(widget)
@@ -273,6 +285,7 @@ class VideoItemWidget(QFrame):
             w.findChild(QLabel).setText(f"Đoạn {i + 1}:")
         if not self.skip_widgets:
             self.skip_placeholder.setVisible(True)
+        self.stats_changed.emit()
 
     def get_skip_ranges(self):
         ranges = []
@@ -288,8 +301,82 @@ class VideoItemWidget(QFrame):
             return qtime.hour() * 3600 + qtime.minute() * 60 + qtime.second()
         return time_to_sec(self.cut_start.time()), time_to_sec(self.cut_end.time())
 
+    def update_stats(self, speed, segment_sec, global_start, global_end, merge_last, merge_threshold):
+        self.calculated_segments = 0
+        self.calculated_last_duration = 0
+        try:
+            start_sec, end_sec = self.get_cut_times()
+            skip_ranges = self.get_skip_ranges()
+        except:
+            return
 
-
+        # Apply global trim
+        if global_start > 0:
+            start_sec = max(start_sec, global_start)
+        if global_end > 0:
+            max_end = max(0, self.duration - global_end)
+            end_sec = min(end_sec, max_end)
+            
+        if start_sec >= end_sec:
+            self.stats_label.setText("⚠ Bị cắt hết (Bắt đầu >= Kết thúc)")
+            self.stats_label.setStyleSheet("color: #e11d48; font-size: 11px; font-weight: bold; background-color: #ffe4e6; padding: 4px 8px; border-radius: 4px;")
+            self.stats_label.show()
+            return
+            
+        total_duration = end_sec - start_sec
+        
+        skip_ranges.sort(key=lambda x: x[0])
+        current_start = start_sec
+        current_end = end_sec
+        for skip_start, skip_end in skip_ranges:
+            if skip_end <= current_start or skip_start >= current_end:
+                continue
+            effective_skip_start = max(skip_start, current_start)
+            effective_skip_end = min(skip_end, current_end)
+            if effective_skip_start > current_start:
+                total_duration -= (effective_skip_end - effective_skip_start)
+            current_start = effective_skip_end
+            if current_start >= current_end:
+                break
+                
+        total_duration = max(0, total_duration)
+        
+        if speed > 0:
+            total_duration = total_duration / speed
+            
+        if segment_sec > 0 and total_duration > 0:
+            segments = int(total_duration / segment_sec)
+            remainder = total_duration % segment_sec
+            
+            if remainder < 0.1:
+                last_duration = segment_sec
+            else:
+                last_duration = remainder
+                segments += 1
+                
+            if merge_last and segments > 1 and last_duration < merge_threshold:
+                segments -= 1
+                last_duration += segment_sec
+                
+            self.calculated_segments = segments
+            self.calculated_last_duration = last_duration
+                
+            m = int(last_duration // 60)
+            s = int(last_duration % 60)
+            formatted_last = f"{m}p {s}s"
+            
+            total_m = int(total_duration // 60)
+            total_s = int(total_duration % 60)
+            formatted_total = f"{total_m}p {total_s}s"
+                
+            self.stats_label.setText(f"📊 Kết quả: Tổng dài {formatted_total} | Chia làm {segments} Video | Video cuối cùng dài: {formatted_last}")
+            self.stats_label.setStyleSheet("color: #0284c7; font-size: 11.5px; font-weight: bold; background-color: #f0f9ff; padding: 6px 10px; border-radius: 5px;")
+            self.stats_label.show()
+        else:
+            if total_duration > 0:
+                self.calculated_segments = 1
+                self.calculated_last_duration = total_duration
+            self.stats_label.hide()
 
 
 class AutoCutTab(QWidget):
@@ -587,6 +674,30 @@ class AutoCutTab(QWidget):
         merge_layout.addStretch()
         
         layout.addRow("Tùy chọn gộp:", merge_widget)
+
+        # Global Trim (Batch)
+        global_trim_widget = QWidget()
+        global_trim_layout = QHBoxLayout(global_trim_widget)
+        global_trim_layout.setContentsMargins(0, 0, 0, 0)
+        
+        self.global_trim_start = QSpinBox()
+        self.global_trim_start.setRange(0, 3600)
+        self.global_trim_start.setValue(0)
+        self.global_trim_start.setSuffix("s")
+        self.global_trim_start.setToolTip("Bắt đầu xử lý từ giây thứ N (áp dụng chung cho mọi video).")
+        global_trim_layout.addWidget(QLabel("Từ:"))
+        global_trim_layout.addWidget(self.global_trim_start)
+        
+        self.global_trim_end = QSpinBox()
+        self.global_trim_end.setRange(0, 3600)
+        self.global_trim_end.setValue(0)
+        self.global_trim_end.setSuffix("s")
+        self.global_trim_end.setToolTip("Cắt bỏ N giây phần cuối của video (áp dụng chung cho mọi video).")
+        global_trim_layout.addWidget(QLabel(" Bỏ đuôi:"))
+        global_trim_layout.addWidget(self.global_trim_end)
+        
+        global_trim_layout.addStretch()
+        layout.addRow("Cắt thời gian chung:", global_trim_widget)
 
         # Part settings
         part_group = QWidget()
@@ -1528,53 +1639,28 @@ class AutoCutTab(QWidget):
 
     def update_segments_count(self):
         """Cập nhật số lượng video segment ước tính"""
-        work_duration = self.calculate_work_duration()
-        speed = self.speed_input.value()
-
-        # Thời gian sau khi áp dụng speed
-        if speed > 0:
-            adjusted_duration = work_duration / speed
-        else:
-            adjusted_duration = work_duration
-
-        # Tính số segment
-        if self.segment_input.value() > 0:
-            segments = int(adjusted_duration / self.segment_input.value())
-            if adjusted_duration % self.segment_input.value() > 0:
-                segments += 1
-            self.segments_count.setText(str(max(1, segments)))
-        else:
-            segments = 1
-            self.segments_count.setText("1")
-    
-        # Tính thời lượng video cuối
-        if self.segment_input.value() > 0:
-            segment_duration = self.segment_input.value()
-            remainder = adjusted_duration % segment_duration
+        total_segments = 0
+        last_duration = 0
+        
+        if hasattr(self, 'video_item_widgets') and self.video_item_widgets:
+            speed = self.speed_input.value()
+            segment_sec = self.segment_input.value()
+            global_start = self.global_trim_start.value() if hasattr(self, 'global_trim_start') else 0
+            global_end = self.global_trim_end.value() if hasattr(self, 'global_trim_end') else 0
+            merge_last = self.merge_last_checkbox.isChecked()
+            merge_threshold = self.merge_threshold_input.value()
             
-            # Nếu chia hết, video cuối cùng dài bằng segment_duration
-            # Nếu không chia hết, video cuối cùng dài bằng phần dư
-            if remainder < 0.1: # Coi như 0 (do số thực)
-                last_duration = segment_duration
-            else:
-                last_duration = remainder
-
-            # Xử lý logic gộp
-            # Nếu bật gộp VÀ số segment > 1 VÀ last_duration < threshold
-            if (self.merge_last_checkbox.isChecked() and 
-                segments > 1 and 
-                last_duration < self.merge_threshold_input.value()):
-                
-                # Gộp vào video trước nó
-                segments -= 1
-                last_duration += segment_duration
-
-        else:
-            # Nếu không cắt, video cuối là toàn bộ video
-            last_duration = adjusted_duration
-            
-        self.segments_count.setText(str(max(1, segments)))
-        self.last_segment_duration_display.setText(self.format_time(last_duration))
+            for w in self.video_item_widgets:
+                w.update_stats(speed, segment_sec, global_start, global_end, merge_last, merge_threshold)
+                if hasattr(w, 'calculated_segments'):
+                    total_segments += w.calculated_segments
+                if hasattr(w, 'calculated_last_duration') and w.calculated_last_duration > 0:
+                    last_duration = w.calculated_last_duration
+                    
+        if hasattr(self, 'segments_count'):
+            self.segments_count.setText(str(max(0, total_segments)))
+        if hasattr(self, 'last_segment_duration_display'):
+            self.last_segment_duration_display.setText(self.format_time(last_duration))
 
     def update_preview(self):
         """Cập nhật preview khi thay đổi zoom - scale riêng width/height như CapCut"""
@@ -1938,10 +2024,14 @@ class AutoCutTab(QWidget):
             item = VideoItemWidget(video_path, duration)
             item.preview_requested.connect(self.load_preview_from_item)
             item.title_changed.connect(self.on_title_changed)
+            item.stats_changed.connect(self.update_segments_count)
             
             self.video_items_layout.insertWidget(self.video_items_layout.count() - 1, item)
             self.video_item_widgets.append(item)
             QApplication.processEvents()
+
+        # Cập nhật thông số lần đầu cho toàn bộ danh sách
+        self.update_segments_count()
 
         # Tải preview cho video đầu tiên
         if self.video_item_widgets:
@@ -2023,6 +2113,22 @@ class AutoCutTab(QWidget):
                 return
                 
             start_time, end_time = widget.get_cut_times()
+            
+            # Áp dụng cấu hình cắt thời gian chung (nếu có)
+            global_start = self.global_trim_start.value()
+            global_trim_end_val = self.global_trim_end.value()
+            
+            if global_start > 0:
+                start_time = max(start_time, global_start)
+            
+            if global_trim_end_val > 0:
+                # Giới hạn end_time lại
+                max_end = max(0, widget.duration - global_trim_end_val)
+                end_time = min(end_time, max_end)
+                
+            if start_time >= end_time:
+                self.log(f"❌ Video {Path(src_file).name} bị cắt sai (Thời gian bắt đầu >= kết thúc). Vui lòng kiểm tra lại cấu hình Cắt thời gian chung!")
+                return
             
             if self.processing_mode == "single":
                 dest_dir = out_base
