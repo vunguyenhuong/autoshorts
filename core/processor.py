@@ -181,7 +181,7 @@ class ShortsProcessor:
                     dur = self.get_video_duration_fast(f_path)
                     if dur > 0:
                         # Pre-filter large videos if strict mode or Under 1 min mode is on
-                        if ((not skip_merge and duration_mode == 'max') or only_under_1min) and dur >= 59:
+                        if ((not skip_merge and duration_mode == 'max') or only_under_1min) and dur >= 60:
                             continue
                         
                         eff_dur = dur / speed
@@ -210,7 +210,7 @@ class ShortsProcessor:
                     
                     # Check limit for Under 1 min mode
                     if duration_mode == 'max':
-                        if (current_duration + eff_dur) > 59:
+                        if (current_duration + eff_dur) > 59.9:
                             idx += 1
                             continue
                     
@@ -265,14 +265,14 @@ class ShortsProcessor:
         # Filtering logic for individual videos: Only filter by duration if strictly requested via checkbox
         if only_under_1min:
             if progress_callback:
-                progress_callback(f"🛡️ Bật chế độ lọc nghiêm ngặt (chỉ lấy video < 59s) cho Edit lẻ")
+                progress_callback(f"🛡️ Bật chế độ lọc nghiêm ngặt (chỉ lấy video < 60s) cho Edit lẻ")
             
             for f in files:
                 dur = self.get_video_duration_fast(f)
-                if dur >= 59:
+                if dur >= 60:
                     discarded_videos.append(f)
                     if progress_callback:
-                        progress_callback(f"⏭️ Loại bỏ video >= 59s: {os.path.basename(f)}")
+                        progress_callback(f"⏭️ Loại bỏ video >= 60s: {os.path.basename(f)}")
                 else:
                     video_pool.append(f)
             
@@ -373,17 +373,17 @@ class ShortsProcessor:
         skip_merge = settings.get('skip_merge', False) # Should be false here
         
         if progress_callback and (duration_mode == 'max' or only_under_1min):
-            progress_callback(f"🛡️ Bật chế độ lọc nghiêm ngặt (chỉ lấy video < 59s)")
+            progress_callback(f"🛡️ Bật chế độ lọc nghiêm ngặt (chỉ lấy video < 60s)")
 
         for f in files:
             dur = self.get_video_duration_fast(f)
             # Filter condition: Merge mode with 'max' duration OR explicit strict filter
-            is_too_long = ((not skip_merge and duration_mode == 'max') or only_under_1min) and dur >= 59
+            is_too_long = ((not skip_merge and duration_mode == 'max') or only_under_1min) and dur >= 60
             
             if is_too_long:
                 discarded_videos.append(f)
                 if progress_callback:
-                    progress_callback(f"⏭️ Loại bỏ video >= 59s: {os.path.basename(f)}")
+                    progress_callback(f"⏭️ Loại bỏ video >= 60s: {os.path.basename(f)}")
             else:
                 video_pool.append(f)
         
@@ -419,8 +419,8 @@ class ShortsProcessor:
                     
                     # Check selection limits
                     if duration_mode == 'max':
-                        # Mode: Under 1 minute (hard limit 59s)
-                        if (current_duration + eff_dur) > 59:
+                        # Mode: Under 1 minute (hard limit 59.9s)
+                        if (current_duration + eff_dur) > 59.9:
                             pool_idx += 1
                             continue
                     
@@ -722,16 +722,13 @@ class ShortsProcessor:
                 iw, ih = self._probe_dims(f_path)
                 has_audio = self._has_audio_stream(f_path)
                 
-                # Calculate scale factor to FIT video into canvas (like autocut)
-                # Fit: scale down so the entire video fits inside the canvas
-                max_width = CW  # 1080
-                if iw > max_width:
-                    fit_scale = max_width / iw
-                    fit_width = max_width
-                    fit_height = int(ih * fit_scale)
-                else:
-                    fit_width = iw
-                    fit_height = ih
+                # Cover fill: scale the video so that it completely covers the canvas (1080x1920)
+                # This ensures no padding borders are visible by default
+                scale_x_ratio = CW / iw
+                scale_y_ratio = CH / ih
+                cover_scale = max(scale_x_ratio, scale_y_ratio)
+                fit_width = int(iw * cover_scale)
+                fit_height = int(ih * cover_scale)
                 
                 # Apply user stretch (scale_x, scale_y) on top of the fit size
                 scaled_width = int(fit_width * sx)
