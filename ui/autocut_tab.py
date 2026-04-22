@@ -474,6 +474,10 @@ class AutoCutTab(QWidget):
         default_output = str(Path.home() / "Documents" / "VideoEditor" / "Output")
         self.output_input.setText(default_output)
 
+        # Ẩn batch folder option khi mặc định là single mode
+        if hasattr(self, 'batch_folder_container'):
+            self.batch_folder_container.setVisible(False)
+
     def create_header(self, parent_layout):
         """Tạo header đơn giản"""
         header_frame = QFrame()
@@ -561,6 +565,7 @@ class AutoCutTab(QWidget):
         return panel
 
     def create_file_group(self):
+        from PyQt6.QtWidgets import QRadioButton, QButtonGroup
         group = QGroupBox("")
         layout = QFormLayout()
         layout.setSpacing(8)
@@ -606,6 +611,33 @@ class AutoCutTab(QWidget):
         output_layout.addWidget(output_btn, 1)
 
         layout.addRow("Xuất:", output_widget)
+
+        # Batch output folder mode (only relevant for batch)
+        self.batch_folder_container = QWidget()
+        batch_folder_layout = QHBoxLayout(self.batch_folder_container)
+        batch_folder_layout.setContentsMargins(0, 0, 0, 0)
+        batch_folder_layout.setSpacing(12)
+
+        self.output_flat_radio = QRadioButton("Xuất chung 1 thư mục")
+        self.output_flat_radio.setChecked(True)
+        self.output_flat_radio.setToolTip("Tất cả video con được xuất thẳng vào thư mục đích")
+        batch_folder_layout.addWidget(self.output_flat_radio)
+
+        self.output_subfolder_radio = QRadioButton("Chia folder riêng (tên = tên video)")
+        self.output_subfolder_radio.setToolTip("Mỗi video sẽ được xuất vào subfolder có tên là tiêu đề video đó")
+        batch_folder_layout.addWidget(self.output_subfolder_radio)
+
+        self.output_distribute_radio = QRadioButton("Mỗi video gốc ánh xạ vào 1 folder có sẵn")
+        self.output_distribute_radio.setToolTip("Video cấu hình 1 -> thả tất cả clip cắt ra vào Folder 1. Cấu hình 2 -> thả vào Folder 2...")
+        batch_folder_layout.addWidget(self.output_distribute_radio)
+
+        self.batch_output_btn_group = QButtonGroup(self)
+        self.batch_output_btn_group.addButton(self.output_flat_radio)
+        self.batch_output_btn_group.addButton(self.output_subfolder_radio)
+        self.batch_output_btn_group.addButton(self.output_distribute_radio)
+
+        batch_folder_layout.addStretch()
+        layout.addRow("Output (Batch):", self.batch_folder_container)
 
         # Title Y position
         self.title_y_input = QSpinBox()
@@ -1937,8 +1969,12 @@ class AutoCutTab(QWidget):
         self.processing_mode = mode
         if mode == "single":
             self.video_input.setPlaceholderText("Chọn video...")
+            if hasattr(self, 'batch_folder_container'):
+                self.batch_folder_container.setVisible(False)
         else:
             self.video_input.setPlaceholderText("Chọn thư mục chứa video...")
+            if hasattr(self, 'batch_folder_container'):
+                self.batch_folder_container.setVisible(True)
             
         self.video_input.setText("")
         self.current_video_path = None
@@ -2098,6 +2134,11 @@ class AutoCutTab(QWidget):
         input_path = self.video_input.text()
         out_base = self.output_input.text()
 
+        # Dọn dẹp cache của distribute nếu có
+        if hasattr(self, '_cached_distribute_folders'):
+            del self._cached_distribute_folders
+            del self._distribute_index
+
         for widget in self.video_item_widgets:
             src_file = widget.path
             title = widget.title_input.text().strip()
@@ -2133,14 +2174,43 @@ class AutoCutTab(QWidget):
             if self.processing_mode == "single":
                 dest_dir = out_base
             else:
-                try:
-                    rel_path = os.path.relpath(os.path.dirname(src_file), input_path)
-                    if rel_path == '.':
-                        dest_dir = out_base
+                # Kiểm tra chế độ output của batch
+                use_subfolder = hasattr(self, 'output_subfolder_radio') and self.output_subfolder_radio.isChecked()
+                use_distribute = hasattr(self, 'output_distribute_radio') and self.output_distribute_radio.isChecked()
+                
+                if use_subfolder:
+                    # Mỗi video xuất vào subfolder tên = tiêu đề video
+                    safe_title = title.replace('/', '_').replace('\\', '_').replace(':', '_').replace('*', '_').replace('?', '_').replace('"', '_').replace('<', '_').replace('>', '_').replace('|', '_')
+                    dest_dir = os.path.join(out_base, safe_title)
+                elif use_distribute:
+                    # Thu thập các thư mục đã có sẵn trong out_base (chỉ làm 1 lần)
+                    if not hasattr(self, '_cached_distribute_folders'):
+                        try:
+                            self._cached_distribute_folders = sorted([
+                                d for d in os.listdir(out_base) 
+                                if os.path.isdir(os.path.join(out_base, d))
+                            ])
+                            self._distribute_index = 0
+                        except:
+                            self._cached_distribute_folders = []
+                            self._distribute_index = 0
+                    
+                    if self._cached_distribute_folders:
+                        target_sub = self._cached_distribute_folders[self._distribute_index % len(self._cached_distribute_folders)]
+                        dest_dir = os.path.join(out_base, target_sub)
+                        self._distribute_index += 1
+                        self.log(f"  Phân phối video '{title}' vào mục: {target_sub}")
                     else:
-                        dest_dir = os.path.join(out_base, rel_path)
-                except:
-                    dest_dir = out_base
+                        dest_dir = out_base # Fallback nếu ko có subfolder nào
+                else:
+                    try:
+                        rel_path = os.path.relpath(os.path.dirname(src_file), input_path)
+                        if rel_path == '.':
+                            dest_dir = out_base
+                        else:
+                            dest_dir = os.path.join(out_base, rel_path)
+                    except:
+                        dest_dir = out_base
 
             self.video_queue.append({
                 "src_file": src_file,

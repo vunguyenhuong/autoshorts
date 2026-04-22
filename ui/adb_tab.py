@@ -2,7 +2,8 @@ import os
 import json
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, QPushButton, 
-    QLabel, QProgressBar, QSpinBox, QFileDialog, QGroupBox, QMessageBox, QTextEdit, QScrollArea
+    QLabel, QProgressBar, QSpinBox, QFileDialog, QGroupBox, QMessageBox, QTextEdit, QScrollArea,
+    QRadioButton, QButtonGroup
 )
 from PyQt6.QtCore import Qt, pyqtSignal
 from core.adb_uploader import AdbUploadThread
@@ -55,6 +56,25 @@ class AdbTaskWidget(QGroupBox):
         self.device_input.setMaximumHeight(80)
         self.device_input.setMinimumHeight(60)
         layout.addWidget(self.device_input)
+
+        # Quick create folder row
+        device_action_row = QHBoxLayout()
+        self.quick_create_folder_btn = QPushButton("📁 Tạo nhánh (Sub-folder) bằng tên Devices ID")
+        self.quick_create_folder_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #28a745;
+                color: white;
+                font-weight: bold;
+                border-radius: 4px;
+                padding: 4px 10px;
+            }
+            QPushButton:hover { background-color: #218838; }
+        """)
+        self.quick_create_folder_btn.setToolTip("Tự động tạo các thư mục con trong 'Thư mục Video' tương ứng với mỗi Device ID đã nhập")
+        self.quick_create_folder_btn.clicked.connect(self.quick_create_folders)
+        device_action_row.addWidget(self.quick_create_folder_btn)
+        device_action_row.addStretch()
+        layout.addLayout(device_action_row)
         
         # Settings Row
         settings_row = QHBoxLayout()
@@ -79,6 +99,33 @@ class AdbTaskWidget(QGroupBox):
             
         layout.addLayout(settings_row)
 
+        # Scan mode row
+        scan_row = QHBoxLayout()
+        scan_row_label = QLabel("Chế độ quét:")
+        scan_row_label.setStyleSheet("font-weight: bold; color: #333;")
+        scan_row.addWidget(scan_row_label)
+
+        self.scan_folder_radio = QRadioButton("📁 Folder gốc")
+        self.scan_folder_radio.setChecked(True)
+        self.scan_folder_radio.setToolTip("Chỉ lấy video trực tiếp trong thư mục đã chọn, bỏ qua subfolder")
+        scan_row.addWidget(self.scan_folder_radio)
+
+        self.scan_paired_radio = QRadioButton("📂 1 Máy → 1 Folder")
+        self.scan_paired_radio.setToolTip("Mỗi thiết bị được gán với 1 subfolder tương ứng (theo thứ tự A-Z)")
+        scan_row.addWidget(self.scan_paired_radio)
+
+        self.scan_random_radio = QRadioButton("🔀 Ngẫu nhiên (quét cả subfolder)")
+        self.scan_random_radio.setToolTip("Quét đệ quy tất cả subfolder và trộn đều video ngẫu nhiên")
+        scan_row.addWidget(self.scan_random_radio)
+
+        self.scan_btn_group = QButtonGroup(self)
+        self.scan_btn_group.addButton(self.scan_folder_radio)
+        self.scan_btn_group.addButton(self.scan_paired_radio)
+        self.scan_btn_group.addButton(self.scan_random_radio)
+
+        scan_row.addStretch()
+        layout.addLayout(scan_row)
+
     def browse_folder(self):
         folder = QFileDialog.getExistingDirectory(self, "Chọn thư mục Video")
         if folder:
@@ -87,10 +134,18 @@ class AdbTaskWidget(QGroupBox):
     def get_data(self):
         text = self.device_input.toPlainText()
         devices = [line.strip() for line in text.split('\n') if line.strip()]
+        # Xác định scan_mode
+        if hasattr(self, 'scan_paired_radio') and self.scan_paired_radio.isChecked():
+            scan_mode = 'paired'  # Mỗi máy → 1 subfolder
+        elif hasattr(self, 'scan_random_radio') and self.scan_random_radio.isChecked():
+            scan_mode = 'random'  # Ngẫu nhiên quét subfolder
+        else:
+            scan_mode = 'flat'    # Chỉ lấy file ở root
         return {
             'devices': devices,
             'folder': self.folder_input.text().strip(),
-            'limit': self.limit_spin.value()
+            'limit': self.limit_spin.value(),
+            'scan_mode': scan_mode
         }
 
     def set_data(self, data):
@@ -100,14 +155,59 @@ class AdbTaskWidget(QGroupBox):
             self.folder_input.setText(data['folder'])
         if 'limit' in data:
             self.limit_spin.setValue(data['limit'])
+        # Hỗ trợ cả trường hợp cũ (scan_recursive) và mới (scan_mode)
+        if hasattr(self, 'scan_paired_radio'):
+            scan_mode = data.get('scan_mode', '')
+            scan_recursive = data.get('scan_recursive', False)
+            if scan_mode == 'paired':
+                self.scan_paired_radio.setChecked(True)
+            elif scan_mode == 'random' or scan_recursive:
+                self.scan_random_radio.setChecked(True)
+            else:
+                self.scan_folder_radio.setChecked(True)
 
     def set_enabled(self, enabled):
         self.folder_input.setEnabled(enabled)
         self.browse_btn.setEnabled(enabled)
         self.device_input.setEnabled(enabled)
+        self.quick_create_folder_btn.setEnabled(enabled)
         self.limit_spin.setEnabled(enabled)
+        if hasattr(self, 'scan_folder_radio'):
+            self.scan_folder_radio.setEnabled(enabled)
+        if hasattr(self, 'scan_paired_radio'):
+            self.scan_paired_radio.setEnabled(enabled)
+        if hasattr(self, 'scan_random_radio'):
+            self.scan_random_radio.setEnabled(enabled)
         if hasattr(self, 'remove_btn'):
             self.remove_btn.setEnabled(enabled)
+
+    def quick_create_folders(self):
+        folder = self.folder_input.text().strip()
+        if not folder or not os.path.isdir(folder):
+            QMessageBox.warning(self, "Lỗi", "Vui lòng chọn 'Thư mục Video' hợp lệ trước.")
+            return
+        
+        text = self.device_input.toPlainText()
+        devices = [line.strip() for line in text.split('\n') if line.strip()]
+        if not devices:
+            QMessageBox.warning(self, "Lỗi", "Vui lòng nhập danh sách Device IDs.")
+            return
+
+        created = 0
+        for device in devices:
+            safe_device = device.replace(':', '_').replace('/', '_').replace('\\', '_')
+            path = os.path.join(folder, safe_device)
+            if not os.path.exists(path):
+                try:
+                    os.makedirs(path)
+                    created += 1
+                except:
+                    pass
+        
+        if created > 0:
+            QMessageBox.information(self, "Thành công", f"Đã tự động tạo mới {created} thư mục con.")
+        else:
+            QMessageBox.information(self, "Thông báo", "Tất cả các thư mục con đã tồn tại hoặc không thể tạo.")
 
 class AdbTab(QWidget):
     log_message = pyqtSignal(str)
@@ -195,6 +295,40 @@ class AdbTab(QWidget):
         self.stop_btn.clicked.connect(self.stop_transfer)
         self.stop_btn.setEnabled(False)
         actions_layout.addWidget(self.stop_btn, 1)
+
+        self.clean_done_btn = QPushButton("🗑️ Dọn folder Done")
+        self.clean_done_btn.setFixedHeight(40)
+        self.clean_done_btn.setToolTip("Xóa vĩnh viễn tất cả video trong các thư mục 'done' của các tác vụ đang cấu hình")
+        self.clean_done_btn.setStyleSheet("""
+            QPushButton {
+                font-size: 13px;
+                font-weight: bold;
+                background-color: #6c757d;
+                color: white;
+            }
+            QPushButton:hover {
+                background-color: #5a6268;
+            }
+        """)
+        self.clean_done_btn.clicked.connect(self.clean_done_folders)
+        actions_layout.addWidget(self.clean_done_btn, 1)
+
+        self.check_unused_btn = QPushButton("🔍 Kiểm tra video còn lại")
+        self.check_unused_btn.setFixedHeight(40)
+        self.check_unused_btn.setToolTip("Kiểm tra bao nhiêu video chưa được truyền trong các tác vụ")
+        self.check_unused_btn.setStyleSheet("""
+            QPushButton {
+                font-size: 13px;
+                font-weight: bold;
+                background-color: #17a2b8;
+                color: white;
+            }
+            QPushButton:hover {
+                background-color: #138496;
+            }
+        """)
+        self.check_unused_btn.clicked.connect(self.check_unused_videos)
+        actions_layout.addWidget(self.check_unused_btn, 1)
         
         layout.addLayout(actions_layout)
         
@@ -335,3 +469,152 @@ class AdbTab(QWidget):
         self.add_task_btn.setEnabled(enabled)
         for w in self.task_widgets:
             w.set_enabled(enabled)
+
+    def check_unused_videos(self):
+        """Kiểm tra và đếm số lượng video chưa sử dụng trong các tác vụ, chi tiết đến từng folder."""
+        valid_exts = ('.mp4', '.mov', '.avi', '.mkv', '.wmv')
+        total_unused_all = 0
+        details = []
+
+        for i, w in enumerate(self.task_widgets):
+            data = w.get_data()
+            folder = data.get('folder', '').strip()
+            if not folder or not os.path.isdir(folder):
+                continue
+            
+            scan_mode = data.get('scan_mode', 'flat')
+            task_unused = 0
+            
+            self.log_message.emit(f"▶ Bắt đầu kiểm tra Tác vụ {i+1} (<b style='color: #d63384;'>{os.path.basename(folder)}</b>):")
+            
+            try:
+                if scan_mode == 'paired':
+                    subfolders = [
+                        d for d in os.listdir(folder)
+                        if os.path.isdir(os.path.join(folder, d)) and d.lower() != 'done'
+                    ]
+                    self.log_message.emit(f"   ► Phát hiện <b style='color: #fd7e14;'>{len(subfolders)} subfolder</b> hợp lệ:")
+                    for sf in sorted(subfolders):
+                        sf_path = os.path.join(folder, sf)
+                        sub_unused = len([
+                            f for f in os.listdir(sf_path)
+                            if os.path.isfile(os.path.join(sf_path, f)) and f.lower().endswith(valid_exts)
+                        ])
+                        task_unused += sub_unused
+                        if sub_unused > 0:
+                            self.log_message.emit(f"   • {sf}: <b style='color: #007bff; font-size: 14px;'>{sub_unused} video</b>")
+                        else:
+                            self.log_message.emit(f"   • {sf}: <b style='color: #dc3545;'>Hết video</b>")
+                elif scan_mode == 'random':
+                    for root, dirs, files in os.walk(folder):
+                        dirs[:] = [d for d in dirs if d.lower() != 'done']
+                        task_unused += len([
+                            f for f in files
+                            if f.lower().endswith(valid_exts)
+                        ])
+                    self.log_message.emit(f"   • Tất cả subfolder gộp lại: <b style='color: #007bff; font-size: 14px;'>{task_unused} video</b>")
+                else: # flat
+                    task_unused = len([
+                        f for f in os.listdir(folder)
+                        if os.path.isfile(os.path.join(folder, f)) and f.lower().endswith(valid_exts)
+                    ])
+                    self.log_message.emit(f"   • Thư mục gốc: <b style='color: #007bff; font-size: 14px;'>{task_unused} video</b>")
+            except Exception as e:
+                self.log_message.emit(f"❌ Lỗi kiểm tra tác vụ {i+1}: {e}")
+                
+            total_unused_all += task_unused
+
+        if total_unused_all == 0:
+            self.log_message.emit("🔍 Kiểm tra xong: <b>Không còn video nào chưa dùng</b> trong các tác vụ hợp lệ.")
+            QMessageBox.information(self, "Thông báo", "Không còn video nào chưa sử dụng hoặc chưa cấu hình tác vụ hợp lệ.")
+            return
+
+        self.log_message.emit(f"✅ Hoàn tất kiểm tra: Tổng cộng còn <b style='color: #28a745; font-size: 15px;'>{total_unused_all} video</b> chưa dùng.")
+        QMessageBox.information(self, "Kết quả kiểm tra", f"Tìm thấy tổng cộng: {total_unused_all} video chưa sử dụng.\nChi tiết đã được in ra bảng Log.")
+
+    def clean_done_folders(self):
+        """Xóa vĩnh viễn tất cả video trong các thư mục 'done' của mọi tác vụ."""
+        import shutil
+
+        # Thu thập tất cả các thư mục done cần dọn
+        done_dirs_to_clean = []
+        for w in self.task_widgets:
+            data = w.get_data()
+            folder = data.get('folder', '').strip()
+            if not folder or not os.path.isdir(folder):
+                continue
+
+            scan_mode = data.get('scan_mode', 'flat')
+
+            if scan_mode == 'paired':
+                # Mỗi subfolder có folder done riêng
+                try:
+                    subfolders = [
+                        d for d in os.listdir(folder)
+                        if os.path.isdir(os.path.join(folder, d)) and d.lower() != 'done'
+                    ]
+                    for sf in subfolders:
+                        done_path = os.path.join(folder, sf, 'done')
+                        if os.path.isdir(done_path):
+                            done_dirs_to_clean.append(done_path)
+                except Exception:
+                    pass
+            else:
+                # Flat / random: done nằm ở root folder
+                done_path = os.path.join(folder, 'done')
+                if os.path.isdir(done_path):
+                    done_dirs_to_clean.append(done_path)
+
+        if not done_dirs_to_clean:
+            QMessageBox.information(self, "Thông báo", "Không tìm thấy thư mục 'done' nào cần dọn.")
+            return
+
+        # Đếm tổng số file
+        total_files = 0
+        for d in done_dirs_to_clean:
+            try:
+                total_files += len([
+                    f for f in os.listdir(d)
+                    if os.path.isfile(os.path.join(d, f))
+                ])
+            except Exception:
+                pass
+
+        # Hiển thị danh sách thư mục và xin xác nhận
+        dirs_preview = "\n".join(f"  • {d}" for d in done_dirs_to_clean[:10])
+        if len(done_dirs_to_clean) > 10:
+            dirs_preview += f"\n  ... và {len(done_dirs_to_clean) - 10} thư mục khác"
+
+        reply = QMessageBox.warning(
+            self,
+            "⚠️ Xác nhận xóa vĩnh viễn",
+            f"Bạn có chắc muốn xóa vĩnh viễn {total_files} file "
+            f"trong {len(done_dirs_to_clean)} thư mục 'done'?\n\n"
+            f"{dirs_preview}\n\n"
+            "⚠️ Hành động này KHÔNG THỂ HOÀN TÁC!",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        # Tiến hành xóa vĩnh viễn
+        deleted_files = total_files # dùng lại số đếm bên trên
+        deleted_empty_subfolders = 0
+        errors = 0
+        
+        for done_dir in done_dirs_to_clean:
+            try:
+                if os.path.isdir(done_dir):
+                    shutil.rmtree(done_dir) # xóa hoàn toàn thư mục done
+            except Exception as e:
+                self.log_message.emit(f"❌ Lỗi xóa folder done '{done_dir}': {e}")
+                errors += 1
+
+        msg = f"🗑️ Đã dọn dẹp {deleted_files} file từ thư mục 'done'."
+        if errors:
+            msg += f"\n({errors} lỗi)"
+            
+        self.log_message.emit(msg.replace('\n', ' - '))
+        self.info_label.setText(msg)
+        QMessageBox.information(self, "Hoàn tất", msg)

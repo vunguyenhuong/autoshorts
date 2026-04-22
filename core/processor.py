@@ -181,8 +181,13 @@ class ShortsProcessor:
                     dur = self.get_video_duration_fast(f_path)
                     if dur > 0:
                         # Pre-filter large videos if strict mode or Under 1 min mode is on
-                        if ((not skip_merge and duration_mode == 'max') or only_under_1min) and dur >= 60:
+                        if only_under_1min and dur >= 60:
                             continue
+                            
+                        trim_long_videos = settings.get('trim_long_videos', False)
+                        # If >= 60s and (trim_long_videos or not skip_merge), we randomly cut it to < 60s. For estimation, use expected average (e.g. 45s).
+                        if dur >= 60 and (trim_long_videos or not skip_merge):
+                            dur = 45.0
                         
                         eff_dur = dur / speed
                         video_pool.append(eff_dur)
@@ -255,32 +260,38 @@ class ShortsProcessor:
             return
 
         # Filtering logic for individual videos
-        duration_mode = settings.get('duration_mode', 'min')
         only_under_1min = settings.get('only_under_1min', False)
-        skip_merge = settings.get('skip_merge', False)
+        trim_long_videos = settings.get('trim_long_videos', False)
         
         video_pool = []
         discarded_videos = []
         
-        # Filtering logic for individual videos: Only filter by duration if strictly requested via checkbox
-        if only_under_1min:
-            if progress_callback:
+        # Filtering logic for individual videos
+        if only_under_1min or trim_long_videos:
+            if progress_callback and only_under_1min:
                 progress_callback(f"🛡️ Bật chế độ lọc nghiêm ngặt (chỉ lấy video < 60s) cho Edit lẻ")
             
             for f in files:
                 dur = self.get_video_duration_fast(f)
-                if dur >= 60:
+                if only_under_1min and dur >= 60:
                     discarded_videos.append(f)
                     if progress_callback:
                         progress_callback(f"⏭️ Loại bỏ video >= 60s: {os.path.basename(f)}")
+                elif trim_long_videos and dur >= 60:
+                    trim_dur = random.uniform(30.0, 55.0)
+                    video_pool.append({"path": f, "dur": trim_dur, "trim_dur": trim_dur, "original_dur": dur})
+                    if progress_callback:
+                        progress_callback(f"✂️ Cắt ngẫu nhiên đuôi video dài {dur:.1f}s giữ lại {trim_dur:.1f}s: {os.path.basename(f)}")
                 else:
-                    video_pool.append(f)
+                    video_pool.append({"path": f, "dur": dur})
             
             # Move discarded others if any
             if discarded_videos:
                 self._move_to_unused(source_folder, discarded_videos, progress_callback)
             
             files = video_pool
+        else:
+            files = [{"path": f, "dur": self.get_video_duration_fast(f)} for f in files]
         
         if not files:
             if progress_callback: progress_callback("No valid videos found after filtering.")
@@ -297,11 +308,17 @@ class ShortsProcessor:
         if progress_callback:
             progress_callback(f"🚀 Chạy đa luồng: Xuất {max_workers} video cùng lúc")
             
-        def process_single(idx, f_path):
+        def process_single(idx, f_item):
             if check_cancel and check_cancel():
                 return
             
+            f_path = f_item['path'] if isinstance(f_item, dict) else f_item
             filename = os.path.basename(f_path)
+            
+            prefix = settings.get('output_prefix', '')
+            if prefix:
+                filename = f"{prefix} - {filename}"
+                
             output_path = os.path.join(output_folder, filename)
             
             if progress_callback:
@@ -309,7 +326,7 @@ class ShortsProcessor:
             
             try:
                 # Use existing render_batch with single video
-                self.render_batch([f_path], output_path, settings, progress_callback)
+                self.render_batch([f_item], output_path, settings, progress_callback)
                 if progress_callback:
                     progress_callback(f"✓ Completed: {filename}")
             except Exception as e:
@@ -319,7 +336,7 @@ class ShortsProcessor:
                     progress_callback(f"✗ Failed: {filename} - {str(e)}")
                     
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = [executor.submit(process_single, idx, f_path) for idx, f_path in enumerate(files, 1)]
+            futures = [executor.submit(process_single, idx, f_item) for idx, f_item in enumerate(files, 1)]
             concurrent.futures.wait(futures)
         
         if progress_callback:
@@ -372,20 +389,25 @@ class ShortsProcessor:
         only_under_1min = settings.get('only_under_1min', False)
         skip_merge = settings.get('skip_merge', False) # Should be false here
         
-        if progress_callback and (duration_mode == 'max' or only_under_1min):
+        if progress_callback and only_under_1min:
             progress_callback(f"🛡️ Bật chế độ lọc nghiêm ngặt (chỉ lấy video < 60s)")
 
         for f in files:
             dur = self.get_video_duration_fast(f)
-            # Filter condition: Merge mode with 'max' duration OR explicit strict filter
-            is_too_long = ((not skip_merge and duration_mode == 'max') or only_under_1min) and dur >= 60
             
-            if is_too_long:
+            if only_under_1min and dur >= 60:
                 discarded_videos.append(f)
                 if progress_callback:
                     progress_callback(f"⏭️ Loại bỏ video >= 60s: {os.path.basename(f)}")
             else:
-                video_pool.append(f)
+                trim_long_videos = settings.get('trim_long_videos', False)
+                if dur >= 60 and (trim_long_videos or not skip_merge):
+                    trim_dur = random.uniform(30.0, 55.0)
+                    video_pool.append({"path": f, "dur": trim_dur, "trim_dur": trim_dur, "original_dur": dur})
+                    if progress_callback:
+                        progress_callback(f"✂️ Cắt ngẫu nhiên đuôi video dài {dur:.1f}s giữ lại {trim_dur:.1f}s: {os.path.basename(f)}")
+                else:
+                    video_pool.append({"path": f, "dur": dur})
         
         if not video_pool:
             if progress_callback: progress_callback("No valid videos found after filtering.")
@@ -408,10 +430,10 @@ class ShortsProcessor:
             while pool_idx < len(video_pool):
                 if check_cancel and check_cancel(): return
                 
-                f_path = video_pool[pool_idx]
+                f_item = video_pool[pool_idx]
                 try:
-                    # Quick check duration
-                    dur = self.get_video_duration_fast(f_path)
+                    f_path = f_item['path'] if isinstance(f_item, dict) else f_item
+                    dur = f_item['dur'] if isinstance(f_item, dict) else self.get_video_duration_fast(f_path)
                     
                     # Apply speed to get effective duration
                     eff_speed = settings.get('speed', 1.0)
@@ -425,7 +447,7 @@ class ShortsProcessor:
                             continue
                     
                     # Add the video to batch
-                    current_batch_files.append(f_path)
+                    current_batch_files.append(f_item)
                     current_duration += eff_dur
                     video_pool.pop(pool_idx)
                     
@@ -439,7 +461,8 @@ class ShortsProcessor:
                         break
                         
                 except Exception as e:
-                    if progress_callback: progress_callback(f"Error reading {os.path.basename(f_path)}: {e}")
+                    err_path = f_item['path'] if isinstance(f_item, dict) else f_item
+                    if progress_callback: progress_callback(f"Error reading {os.path.basename(err_path)}: {e}")
                     video_pool.pop(pool_idx) # Skip bad file
 
             # Check if we actually added any videos to this batch
@@ -466,8 +489,24 @@ class ShortsProcessor:
                 continue
 
             # 2. Render this batch
-            output_filename = f"output_{batch_idx:03d}.mp4"
+            first_item = current_batch_files[0]
+            first_path = first_item['path'] if isinstance(first_item, dict) else first_item
+            base_name = os.path.splitext(os.path.basename(first_path))[0]
+            
+            prefix = settings.get('output_prefix', '')
+            if prefix:
+                output_filename = f"{prefix} - {base_name}.mp4"
+            else:
+                output_filename = f"{base_name}.mp4"
+                
             output_path = os.path.join(output_folder, output_filename)
+            
+            # Prevent accidental overwrites
+            counter = 1
+            while os.path.exists(output_path):
+                output_filename = f"{base_name}_{counter}.mp4"
+                output_path = os.path.join(output_folder, output_filename)
+                counter += 1
             
             if progress_callback: progress_callback(f"Rendering {output_filename}...")
             
@@ -497,8 +536,9 @@ class ShortsProcessor:
         if not os.path.exists(unused_folder):
             os.makedirs(unused_folder)
         
-        for video_path in video_pool:
+        for f_item in video_pool:
             try:
+                video_path = f_item['path'] if isinstance(f_item, dict) else f_item
                 video_name = os.path.basename(video_path)
                 dest_path = os.path.join(unused_folder, video_name)
                 # Check if dest exists to avoid error
@@ -508,8 +548,9 @@ class ShortsProcessor:
                 if progress_callback:
                     progress_callback(f"  → Moved: {video_name}")
             except Exception as e:
+                err_path = f_item['path'] if isinstance(f_item, dict) else f_item
                 if progress_callback:
-                    progress_callback(f"  ⚠️ Failed to move {os.path.basename(video_path)}: {e}")
+                    progress_callback(f"  ⚠️ Failed to move {os.path.basename(err_path)}: {e}")
         
         if progress_callback:
             progress_callback(f"✅ Moved {unused_count} unused video(s) to: {unused_folder}")
@@ -716,8 +757,15 @@ class ShortsProcessor:
         temp_dir = tempfile.mkdtemp()
         temp_files = [None] * len(file_paths)  # Pre-allocate to maintain order
         
-        def process_single_video(i, f_path):
+        def process_single_video(i, f_item):
             try:
+                if isinstance(f_item, dict):
+                    f_path = f_item['path']
+                    trim_dur = f_item.get('trim_dur', None)
+                else:
+                    f_path = f_item
+                    trim_dur = None
+                    
                 # Probe dimensions and audio
                 iw, ih = self._probe_dims(f_path)
                 has_audio = self._has_audio_stream(f_path)
@@ -804,7 +852,11 @@ class ShortsProcessor:
                 if use_nvenc:
                     cmd = [
                         ffmpeg_exe, "-y",
-                        "-hwaccel", "cuda",
+                        "-hwaccel", "cuda"
+                    ]
+                    if trim_dur:
+                        cmd.extend(["-t", f"{trim_dur:.3f}"])
+                    cmd.extend([
                         "-i", f_path,
                         "-filter_complex", filter_complex,
                         "-map", "[v]", "-map", "[a]",
@@ -812,10 +864,14 @@ class ShortsProcessor:
                         "-pix_fmt", "yuv420p", "-r", "30", "-video_track_timescale", "90000",
                         "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2",
                         temp_file
-                    ]
+                    ])
                 else:
                     cmd = [
-                        ffmpeg_exe, "-y",
+                        ffmpeg_exe, "-y"
+                    ]
+                    if trim_dur:
+                        cmd.extend(["-t", f"{trim_dur:.3f}"])
+                    cmd.extend([
                         "-i", f_path,
                         "-filter_complex", filter_complex,
                         "-map", "[v]", "-map", "[a]",
@@ -823,7 +879,7 @@ class ShortsProcessor:
                         "-pix_fmt", "yuv420p", "-r", "30", "-video_track_timescale", "90000",
                         "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2",
                         temp_file
-                    ]
+                    ])
                 
                 # Execute
                 startupinfo = None
@@ -838,14 +894,18 @@ class ShortsProcessor:
                     if use_nvenc:
                         # Fallback to CPU if NVENC fails (concurrent stream limit)
                         cmd_fb = [
-                            ffmpeg_exe, "-y",
+                            ffmpeg_exe, "-y"
+                        ]
+                        if trim_dur:
+                            cmd_fb.extend(["-t", f"{trim_dur:.3f}"])
+                        cmd_fb.extend([
                             "-i", f_path,
                             "-filter_complex", filter_complex,
                             "-map", "[v]", "-map", "[a]",
                             "-c:v", "libx264", "-preset", "fast", "-crf", "18", "-pix_fmt", "yuv420p",
                             "-c:a", "aac", "-b:a", "128k",
                             temp_file
-                        ]
+                        ])
                         result_fb = subprocess.run(cmd_fb, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                                startupinfo=startupinfo, encoding='utf-8', errors='replace')
                         if result_fb.returncode != 0:

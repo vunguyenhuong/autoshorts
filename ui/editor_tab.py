@@ -2,7 +2,7 @@ import os
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, 
     QLabel, QProgressBar, QDoubleSpinBox, QSpinBox, 
-    QFileDialog, QGroupBox, QMessageBox, QCheckBox, QRadioButton, QColorDialog, QSlider, QScrollArea
+    QFileDialog, QGroupBox, QMessageBox, QCheckBox, QRadioButton, QColorDialog, QSlider, QScrollArea, QLineEdit
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
 from PyQt6.QtGui import QColor
@@ -328,8 +328,14 @@ class EditorTab(QWidget):
         only_under_1min_layout.addWidget(QLabel("Lọc Đầu Vào"))
         self.only_under_1min_checkbox = QCheckBox("Chỉ lấy video < 1p")
         self.only_under_1min_checkbox.stateChanged.connect(self.update_estimation_debounced)
-        self.only_under_1min_checkbox.setToolTip("Loại bỏ các video gốc dài trên 1 phút khỏi danh sách ghép")
+        self.only_under_1min_checkbox.setToolTip("Loại bỏ hoàn toàn các video dài trên 1 phút khỏi danh sách xử lý")
         only_under_1min_layout.addWidget(self.only_under_1min_checkbox)
+        
+        self.trim_long_videos_checkbox = QCheckBox("Cắt ngẫu nhiên đuôi video > 1p")
+        self.trim_long_videos_checkbox.stateChanged.connect(self.update_estimation_debounced)
+        self.trim_long_videos_checkbox.setToolTip("Tự động cắt ngẫu nhiên phần đuôi các video dài trên 1 phút (giữ lại 30-55s)")
+        only_under_1min_layout.addWidget(self.trim_long_videos_checkbox)
+        
         param_layout.addLayout(only_under_1min_layout)
         
         # Target Duration
@@ -375,6 +381,16 @@ class EditorTab(QWidget):
         anti_detect_layout.addStretch()
         anti_detect_group.setLayout(anti_detect_layout)
         layout.addWidget(anti_detect_group)
+        
+        # -- Output Prefix --
+        prefix_group = QGroupBox("Đổi tên File Đích")
+        prefix_layout = QHBoxLayout()
+        prefix_layout.addWidget(QLabel("Tiền tố (Prefix):"))
+        self.output_prefix_input = QLineEdit()
+        self.output_prefix_input.setPlaceholderText("VD: My Prefix -> Kết quả: My Prefix - ten_file_goc.mp4 (Để trống nếu muốn giữ nguyên)")
+        prefix_layout.addWidget(self.output_prefix_input)
+        prefix_group.setLayout(prefix_layout)
+        layout.addWidget(prefix_group)
         
         # -- Color Overlay Base Option --
         overlay_group = QGroupBox("Cấu hình chung")
@@ -610,7 +626,9 @@ class EditorTab(QWidget):
             'hflip': getattr(self, 'hflip_checkbox', None) and self.hflip_checkbox.isChecked(),
             'random_color': getattr(self, 'random_color_checkbox', None) and self.random_color_checkbox.isChecked(),
             'film_grain': getattr(self, 'film_grain_checkbox', None) and self.film_grain_checkbox.isChecked(),
-            'only_under_1min': self.only_under_1min_checkbox.isChecked()
+            'only_under_1min': self.only_under_1min_checkbox.isChecked(),
+            'trim_long_videos': getattr(self, 'trim_long_videos_checkbox', None) and self.trim_long_videos_checkbox.isChecked(),
+            'output_prefix': getattr(self, 'output_prefix_input', None) and self.output_prefix_input.text().strip()
         }
 
     def toggle_duration_visibility(self):
