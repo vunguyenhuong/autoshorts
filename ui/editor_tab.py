@@ -1,12 +1,13 @@
 import os
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QPushButton, 
-    QLabel, QProgressBar, QDoubleSpinBox, QSpinBox, 
+    QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
+    QLabel, QProgressBar, QDoubleSpinBox, QSpinBox,
     QFileDialog, QGroupBox, QMessageBox, QCheckBox, QRadioButton, QColorDialog, QSlider, QScrollArea, QLineEdit
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
 from PyQt6.QtGui import QColor
 from core.processor import ShortsProcessor
+from ui.components import PrimaryButton, GhostButton, DangerButton, SmallDangerButton, StyledProgressBar
 
 class VideoProcessorThread(QThread):
     progress = pyqtSignal(str) # Log message
@@ -87,22 +88,7 @@ class EditorTaskWidget(QGroupBox):
         self.remove_callback = remove_callback
         self.param_callback = param_callback # triggers estimation
         
-        # Style the groupbox
-        self.setStyleSheet("""
-            QGroupBox {
-                border: 1px solid #ccc;
-                border-radius: 6px;
-                margin-top: 15px;
-                background-color: rgba(0,0,0,0.02);
-            }
-            QGroupBox::title {
-                subcontrol-origin: margin;
-                left: 10px;
-                padding: 0 5px;
-                color: #333;
-                font-weight: bold;
-            }
-        """)
+        # No inline groupbox style — delegated to global QSS
         self.setup_ui()
 
     def setup_ui(self):
@@ -112,11 +98,11 @@ class EditorTaskWidget(QGroupBox):
         # Source
         src_layout = QHBoxLayout()
         self.src_btn = QPushButton("📁 Folder Nguồn")
-        self.src_btn.setFixedWidth(120)
+        self.src_btn.setFixedWidth(140)
         self.src_btn.clicked.connect(self.browse_source)
         self.src_label = QLabel("Not Selected")
         self.src_label.setWordWrap(True)
-        self.src_label.setStyleSheet("color: #888;")
+        self.src_label.setStyleSheet("color: #64748B; font-size: 12px; background: transparent; border: none;")
         src_layout.addWidget(self.src_btn)
         src_layout.addWidget(self.src_label, 1) # Give stretch
         layout.addLayout(src_layout)
@@ -124,27 +110,25 @@ class EditorTaskWidget(QGroupBox):
         # Output
         dst_layout = QHBoxLayout()
         self.dst_btn = QPushButton("📁 Folder Đích")
-        self.dst_btn.setFixedWidth(120)
+        self.dst_btn.setFixedWidth(140)
         self.dst_btn.clicked.connect(self.browse_output)
         self.dst_label = QLabel("Not Selected")
         self.dst_label.setWordWrap(True)
-        self.dst_label.setStyleSheet("color: #888;")
+        self.dst_label.setStyleSheet("color: #64748B; font-size: 12px; background: transparent; border: none;")
         dst_layout.addWidget(self.dst_btn)
         dst_layout.addWidget(self.dst_label, 1) # Give stretch
-        
         if self.remove_callback:
-            self.remove_btn = QPushButton("❌ Xóa")
-            self.remove_btn.setFixedWidth(60)
+            self.remove_btn = SmallDangerButton("❌ Xóa")
+            self.remove_btn.setFixedWidth(70)
             self.remove_btn.clicked.connect(lambda: self.remove_callback(self))
-            self.remove_btn.setStyleSheet("color: white; background-color: #d9534f; border-radius: 4px; font-weight: bold;")
             dst_layout.addWidget(self.remove_btn)
-            
+
         layout.addLayout(dst_layout)
 
         # Estimation Label
         self.est_label = QLabel("Chưa chọn nguồn")
         self.est_label.setWordWrap(True)
-        self.est_label.setStyleSheet("color: #666; font-size: 11px; font-style: italic;")
+        self.est_label.setStyleSheet("color: #64748B; font-size: 11px; font-style: italic; background: transparent; border: none;")
         layout.addWidget(self.est_label)
 
     def browse_source(self):
@@ -221,7 +205,7 @@ class EditorTab(QWidget):
         # -- Tasks Area (Scrollable) --
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(True)
-        self.scroll_area.setMinimumHeight(250)
+        self.scroll_area.setMinimumHeight(150)
         self.tasks_container = QWidget()
         self.tasks_layout = QVBoxLayout(self.tasks_container)
         self.tasks_layout.setContentsMargins(5, 5, 5, 5)
@@ -234,24 +218,21 @@ class EditorTab(QWidget):
         
         tasks_action_container = QWidget()
         tasks_action_layout = QHBoxLayout(tasks_action_container)
-        tasks_action_layout.setContentsMargins(0, 0, 0, 0)
+        tasks_action_layout.setContentsMargins(0, 16, 0, 0)
         tasks_action_layout.setSpacing(10)
         
-        self.add_task_btn = QPushButton("➕ Thêm Tác Vụ")
-        self.add_task_btn.setFixedHeight(40)
-        self.add_task_btn.setStyleSheet("font-size: 13px; font-weight: bold; background-color: #5cb85c; color: white;")
+        self.add_task_btn = PrimaryButton("➕ Thêm Tác Vụ")
+        self.add_task_btn.setFixedHeight(50)
         self.add_task_btn.clicked.connect(self.add_task_widget)
         tasks_action_layout.addWidget(self.add_task_btn, 1)
 
-        self.save_cfg_btn = QPushButton("💾 Lưu cấu hình")
-        self.save_cfg_btn.setFixedHeight(40)
-        self.save_cfg_btn.setStyleSheet("font-size: 13px; font-weight: bold; background-color: #f0ad4e; color: white;")
+        self.save_cfg_btn = GhostButton("💾 Lưu cấu hình")
+        self.save_cfg_btn.setFixedHeight(50)
         self.save_cfg_btn.clicked.connect(self.save_config)
         tasks_action_layout.addWidget(self.save_cfg_btn, 1)
 
-        self.load_cfg_btn = QPushButton("📂 Tải cấu hình")
-        self.load_cfg_btn.setFixedHeight(40)
-        self.load_cfg_btn.setStyleSheet("font-size: 13px; font-weight: bold; background-color: #5bc0de; color: white;")
+        self.load_cfg_btn = GhostButton("📂 Tải cấu hình")
+        self.load_cfg_btn.setFixedHeight(50)
         self.load_cfg_btn.clicked.connect(self.load_config)
         tasks_action_layout.addWidget(self.load_cfg_btn, 1)
 
@@ -464,39 +445,13 @@ class EditorTab(QWidget):
         actions_layout.setContentsMargins(0, 0, 0, 0)
         actions_layout.setSpacing(10)
         
-        self.run_btn = QPushButton("▶ Start Processing")
-        self.run_btn.setFixedHeight(40)
-        self.run_btn.setStyleSheet("""
-            QPushButton {
-                font-size: 14px; 
-                background-color: #28a745; 
-                color: white;
-                border: none;
-                border-radius: 5px;
-            }
-            QPushButton:disabled {
-                background-color: #6c757d;
-                color: #adb5bd;
-            }
-        """)
+        self.run_btn = PrimaryButton("▶ Start Processing")
+        self.run_btn.setFixedHeight(50)
         self.run_btn.clicked.connect(self.start_processing)
         actions_layout.addWidget(self.run_btn, 1)
-        
-        self.stop_btn = QPushButton("⏹ Stop Processing")
-        self.stop_btn.setFixedHeight(40)
-        self.stop_btn.setStyleSheet("""
-            QPushButton {
-                font-size: 14px; 
-                background-color: #dc3545; 
-                color: white;
-                border: none;
-                border-radius: 5px;
-            }
-            QPushButton:disabled {
-                background-color: #6c757d;
-                color: #adb5bd;
-            }
-        """)
+
+        self.stop_btn = DangerButton("⏹ Stop Processing")
+        self.stop_btn.setFixedHeight(50)
         self.stop_btn.clicked.connect(self.stop_processing)
         self.stop_btn.setEnabled(False)
         actions_layout.addWidget(self.stop_btn, 1)
@@ -504,7 +459,7 @@ class EditorTab(QWidget):
         layout.addWidget(actions_container)
         
         # -- Progress Bar --
-        self.progress_bar = QProgressBar()
+        self.progress_bar = StyledProgressBar()
         self.progress_bar.setVisible(False)
         layout.addWidget(self.progress_bar)
 

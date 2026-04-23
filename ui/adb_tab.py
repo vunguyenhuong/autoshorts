@@ -1,12 +1,13 @@
 import os
 import json
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, QPushButton, 
+    QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, QPushButton,
     QLabel, QProgressBar, QSpinBox, QFileDialog, QGroupBox, QMessageBox, QTextEdit, QScrollArea,
     QRadioButton, QButtonGroup
 )
 from PyQt6.QtCore import Qt, pyqtSignal
 from core.adb_uploader import AdbUploadThread
+from ui.components import PrimaryButton, DangerButton, GhostButton, SecondaryButton, SmallDangerButton, StyledProgressBar
 
 class AdbTaskWidget(QGroupBox):
     def __init__(self, remove_callback=None, task_index=1):
@@ -14,21 +15,7 @@ class AdbTaskWidget(QGroupBox):
         self.remove_callback = remove_callback
         
         # Style the groupbox
-        self.setStyleSheet("""
-            QGroupBox {
-                border: 1px solid #ccc;
-                border-radius: 6px;
-                margin-top: 15px;
-                background-color: rgba(0,0,0,0.02);
-            }
-            QGroupBox::title {
-                subcontrol-origin: margin;
-                left: 10px;
-                padding: 0 5px;
-                color: #333;
-                font-weight: bold;
-            }
-        """)
+        # No inline groupbox style — delegated to global QSS
         self.setup_ui()
 
     def setup_ui(self):
@@ -43,7 +30,7 @@ class AdbTaskWidget(QGroupBox):
         folder_row.addWidget(self.folder_input)
         
         self.browse_btn = QPushButton("📁 Browse")
-        self.browse_btn.setFixedWidth(80)
+        self.browse_btn.setFixedWidth(100)
         self.browse_btn.clicked.connect(self.browse_folder)
         folder_row.addWidget(self.browse_btn)
         layout.addLayout(folder_row)
@@ -59,17 +46,7 @@ class AdbTaskWidget(QGroupBox):
 
         # Quick create folder row
         device_action_row = QHBoxLayout()
-        self.quick_create_folder_btn = QPushButton("📁 Tạo nhánh (Sub-folder) bằng tên Devices ID")
-        self.quick_create_folder_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #28a745;
-                color: white;
-                font-weight: bold;
-                border-radius: 4px;
-                padding: 4px 10px;
-            }
-            QPushButton:hover { background-color: #218838; }
-        """)
+        self.quick_create_folder_btn = SecondaryButton("📁 Tạo nhánh (Sub-folder) bằng tên Devices ID")
         self.quick_create_folder_btn.setToolTip("Tự động tạo các thư mục con trong 'Thư mục Video' tương ứng với mỗi Device ID đã nhập")
         self.quick_create_folder_btn.clicked.connect(self.quick_create_folders)
         device_action_row.addWidget(self.quick_create_folder_btn)
@@ -89,11 +66,10 @@ class AdbTaskWidget(QGroupBox):
         settings_row.addSpacing(15)
         
         if self.remove_callback:
-            self.remove_btn = QPushButton("❌ Xóa")
-            self.remove_btn.setFixedWidth(60)
+            self.remove_btn = SmallDangerButton("❌ Xóa")
+            self.remove_btn.setFixedWidth(70)
             self.remove_btn.clicked.connect(lambda: self.remove_callback(self))
-            self.remove_btn.setStyleSheet("color: white; background-color: #d9534f; border-radius: 4px; font-weight: bold;")
-            settings_row.addWidget(self.remove_btn)
+            folder_row.addWidget(self.remove_btn)
             
         settings_row.addStretch()
             
@@ -102,7 +78,7 @@ class AdbTaskWidget(QGroupBox):
         # Scan mode row
         scan_row = QHBoxLayout()
         scan_row_label = QLabel("Chế độ quét:")
-        scan_row_label.setStyleSheet("font-weight: bold; color: #333;")
+        scan_row_label.setStyleSheet("font-weight: 700; color: #CBD5E1; background: transparent; border: none;")
         scan_row.addWidget(scan_row_label)
 
         self.scan_folder_radio = QRadioButton("📁 Folder gốc")
@@ -222,7 +198,7 @@ class AdbTab(QWidget):
         # -- Tasks Area (Scrollable) --
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(True)
-        self.scroll_area.setMinimumHeight(400)
+        self.scroll_area.setMinimumHeight(150)
         self.tasks_container = QWidget()
         self.tasks_layout = QVBoxLayout(self.tasks_container)
         self.tasks_layout.setContentsMargins(5, 5, 5, 5)
@@ -235,30 +211,29 @@ class AdbTab(QWidget):
         self.task_counter = 0
         
         tasks_action_layout = QHBoxLayout()
+        tasks_action_layout.setContentsMargins(0, 16, 0, 0)
         tasks_action_layout.setSpacing(10)
         
-        self.add_task_btn = QPushButton("➕ Thêm Tác Vụ")
-        self.add_task_btn.setFixedHeight(40)
+        self.add_task_btn = PrimaryButton("➕ Thêm Tác Vụ")
+        self.add_task_btn.setFixedHeight(50)
         self.add_task_btn.setMinimumWidth(80)
-        self.add_task_btn.setStyleSheet("font-size: 13px; font-weight: bold; background-color: #5cb85c; color: white;")
         self.add_task_btn.clicked.connect(self.add_task_widget)
         tasks_action_layout.addWidget(self.add_task_btn, 1)
 
-        self.save_cfg_btn = QPushButton("💾 Lưu Cấu Hình")
-        self.save_cfg_btn.setFixedHeight(40)
+        self.save_cfg_btn = GhostButton("💾 Lưu Cấu Hình")
+        self.save_cfg_btn.setFixedHeight(50)
         self.save_cfg_btn.setMinimumWidth(80)
-        self.save_cfg_btn.setStyleSheet("font-size: 13px; font-weight: bold; background-color: #f0ad4e; color: white;")
         self.save_cfg_btn.clicked.connect(self.save_config)
         tasks_action_layout.addWidget(self.save_cfg_btn, 1)
 
-        self.load_cfg_btn = QPushButton("📂 Tải Cấu Hình")
-        self.load_cfg_btn.setFixedHeight(40)
+        self.load_cfg_btn = GhostButton("📂 Tải Cấu Hình")
+        self.load_cfg_btn.setFixedHeight(50)
         self.load_cfg_btn.setMinimumWidth(80)
-        self.load_cfg_btn.setStyleSheet("font-size: 13px; font-weight: bold; background-color: #5bc0de; color: white;")
         self.load_cfg_btn.clicked.connect(self.load_config)
         tasks_action_layout.addWidget(self.load_cfg_btn, 1)
 
         layout.addLayout(tasks_action_layout)
+
 
         # Add initial task
         self.add_task_widget(is_first=True)
@@ -266,74 +241,39 @@ class AdbTab(QWidget):
         # -- Info Area --
         self.info_label = QLabel("Sẵn sàng truyền dữ liệu.")
         self.info_label.setWordWrap(True)
-        self.info_label.setStyleSheet("color: #888; font-weight: bold;")
+        self.info_label.setStyleSheet("color: #64748B; font-weight: 600; background: transparent; border: none;")
         layout.addWidget(self.info_label)
 
         # Action Buttons --
         actions_layout = QHBoxLayout()
         
-        self.start_btn = QPushButton("▶ Bắt đầu truyền ADB")
-        self.start_btn.setFixedHeight(40)
-        self.start_btn.setStyleSheet("font-size: 14px; font-weight: bold; background-color: #0275d8; color: white;")
+        self.start_btn = PrimaryButton("▶ Bắt đầu truyền ADB")
+        self.start_btn.setFixedHeight(50)
         self.start_btn.clicked.connect(self.start_transfer)
         actions_layout.addWidget(self.start_btn, 1)
-        
-        self.stop_btn = QPushButton("⏹ Dừng lại")
-        self.stop_btn.setFixedHeight(40)
-        self.stop_btn.setStyleSheet("""
-            QPushButton {
-                font-size: 14px; 
-                font-weight: bold;
-                background-color: #dc3545; 
-                color: white;
-            }
-            QPushButton:disabled {
-                background-color: #6c757d;
-                color: #adb5bd;
-            }
-        """)
+
+        self.stop_btn = DangerButton("⏹ Dừng lại")
+        self.stop_btn.setFixedHeight(50)
         self.stop_btn.clicked.connect(self.stop_transfer)
         self.stop_btn.setEnabled(False)
         actions_layout.addWidget(self.stop_btn, 1)
 
-        self.clean_done_btn = QPushButton("🗑️ Dọn folder Done")
-        self.clean_done_btn.setFixedHeight(40)
+        self.clean_done_btn = GhostButton("🗑️ Dọn folder Done")
+        self.clean_done_btn.setFixedHeight(50)
         self.clean_done_btn.setToolTip("Xóa vĩnh viễn tất cả video trong các thư mục 'done' của các tác vụ đang cấu hình")
-        self.clean_done_btn.setStyleSheet("""
-            QPushButton {
-                font-size: 13px;
-                font-weight: bold;
-                background-color: #6c757d;
-                color: white;
-            }
-            QPushButton:hover {
-                background-color: #5a6268;
-            }
-        """)
         self.clean_done_btn.clicked.connect(self.clean_done_folders)
         actions_layout.addWidget(self.clean_done_btn, 1)
 
-        self.check_unused_btn = QPushButton("🔍 Kiểm tra video còn lại")
-        self.check_unused_btn.setFixedHeight(40)
+        self.check_unused_btn = SecondaryButton("🔍 Kiểm tra video còn lại")
+        self.check_unused_btn.setFixedHeight(50)
         self.check_unused_btn.setToolTip("Kiểm tra bao nhiêu video chưa được truyền trong các tác vụ")
-        self.check_unused_btn.setStyleSheet("""
-            QPushButton {
-                font-size: 13px;
-                font-weight: bold;
-                background-color: #17a2b8;
-                color: white;
-            }
-            QPushButton:hover {
-                background-color: #138496;
-            }
-        """)
         self.check_unused_btn.clicked.connect(self.check_unused_videos)
         actions_layout.addWidget(self.check_unused_btn, 1)
         
         layout.addLayout(actions_layout)
         
         # -- Progress --
-        self.progress_bar = QProgressBar()
+        self.progress_bar = StyledProgressBar()
         layout.addWidget(self.progress_bar)
 
     def add_task_widget(self, is_first=False):

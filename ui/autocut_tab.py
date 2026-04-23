@@ -11,7 +11,8 @@ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
                              QDoubleSpinBox, QTextEdit, QProgressBar, QGroupBox, 
                              QFormLayout, QCheckBox, QComboBox, QColorDialog, 
                              QTimeEdit, QFrame, QGridLayout, QScrollArea, 
-                             QMessageBox, QSlider, QApplication)
+                             QMessageBox, QSlider, QApplication, QSizePolicy, 
+                             QButtonGroup)
 from PyQt6.QtCore import Qt, pyqtSignal, QTime, QTimer
 from PyQt6.QtGui import QFont as QFont_GUI, QColor, QPixmap
 from datetime import datetime
@@ -116,14 +117,7 @@ class VideoItemWidget(QFrame):
     
     def setup_ui(self):
         self.setFrameShape(QFrame.Shape.NoFrame)
-        self.setStyleSheet("""
-            VideoItemWidget { 
-                background-color: #ffffff; 
-                border: 1px solid #e2e8f0; 
-                border-radius: 8px; 
-                margin-bottom: 8px; 
-            }
-        """)
+        # Styling delegated to global QSS VideoItemWidget selector
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(16, 16, 16, 16)
         main_layout.setSpacing(12)
@@ -134,22 +128,22 @@ class VideoItemWidget(QFrame):
         
         path_label = QLabel(f"📄 .../{Path(self.path).name}")
         path_label.setToolTip(self.path)
-        path_label.setStyleSheet("color: #64748b; font-size: 11px; border: none; background: transparent; font-weight: 500;")
+        path_label.setStyleSheet("color: #9d93c0; font-size: 11px; border: none; background: transparent; font-weight: 500;")
         header_layout.addWidget(path_label, stretch=1)
         
         preview_btn = QPushButton("👁 Preview")
         preview_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         preview_btn.setStyleSheet("""
             QPushButton {
-                background-color: #f1f5f9; 
-                color: #0f172a; 
-                border: 1px solid #cbd5e1; 
-                border-radius: 4px; 
-                padding: 4px 12px; 
+                background-color: #2c2840;
+                color: #c4b5fd;
+                border: 1px solid #3d3660;
+                border-radius: 6px;
+                padding: 4px 12px;
                 font-weight: 600;
                 font-size: 11px;
             }
-            QPushButton:hover { background-color: #e2e8f0; }
+            QPushButton:hover { background-color: #3d3660; border-color: #7c3aed; }
         """)
         preview_btn.clicked.connect(lambda: self.preview_requested.emit(self.path, self.duration))
         header_layout.addWidget(preview_btn)
@@ -159,7 +153,7 @@ class VideoItemWidget(QFrame):
         # Title Input
         title_layout = QHBoxLayout()
         title_label = QLabel("Tiêu đề:")
-        title_label.setStyleSheet("color: #334155; font-weight: 600; font-size: 12px; border: none;")
+        title_label.setStyleSheet("color: #ede9ff; font-weight: 600; font-size: 12px; border: none;")
         title_label.setFixedWidth(55)
         title_layout.addWidget(title_label)
 
@@ -169,17 +163,17 @@ class VideoItemWidget(QFrame):
         self.title_input.textChanged.connect(lambda: self.title_changed.emit())
         self.title_input.setStyleSheet("""
             QLineEdit {
-                border: 1px solid #cbd5e1;
-                border-radius: 4px;
-                background-color: #fafafa;
+                border: 1.5px solid #3d3660;
+                border-radius: 6px;
+                background-color: #2c2840;
                 padding: 6px 10px;
-                color: #0f172a;
+                color: #ede9ff;
                 font-size: 13px;
                 font-weight: 500;
             }
             QLineEdit:focus {
-                border: 1px solid #3b82f6;
-                background-color: #ffffff;
+                border-color: #8b5cf6;
+                background-color: #362f52;
             }
         """)
         title_layout.addWidget(self.title_input)
@@ -190,20 +184,20 @@ class VideoItemWidget(QFrame):
         cut_layout.setContentsMargins(0, 0, 0, 0)
         
         cut_icon = QLabel("✂ Khoảng cắt:")
-        cut_icon.setStyleSheet("color: #334155; font-weight: 600; font-size: 12px; border: none;")
-        cut_icon.setFixedWidth(90)
+        cut_icon.setStyleSheet("color: #ede9ff; font-weight: 600; font-size: 12px; border: none;")
+        cut_icon.setFixedWidth(85)
         cut_layout.addWidget(cut_icon)
         
         self.cut_start = QTimeEdit()
         self.cut_start.setDisplayFormat("HH:mm:ss")
         self.cut_start.setTime(QTime(0, 0, 0))
-        self.cut_start.setFixedWidth(80)
-        self.cut_start.setStyleSheet("QTimeEdit { border: 1px solid #cbd5e1; border-radius: 4px; padding: 3px; background-color: white; }")
+        self.cut_start.setFixedWidth(100)
+        self.cut_start.setStyleSheet("QTimeEdit { border: 1.5px solid #3d3660; border-radius: 6px; padding: 3px 6px; background-color: #2c2840; color: #ede9ff; }")
         self.cut_start.timeChanged.connect(lambda: self.stats_changed.emit())
         cut_layout.addWidget(self.cut_start)
 
         to_label = QLabel(" đến ")
-        to_label.setStyleSheet("color: #64748b; font-size: 12px; border: none;")
+        to_label.setStyleSheet("color: #9d93c0; font-size: 12px; border: none;")
         cut_layout.addWidget(to_label)
 
         self.cut_end = QTimeEdit()
@@ -212,8 +206,8 @@ class VideoItemWidget(QFrame):
         m = int((self.duration % 3600) // 60)
         s = int(self.duration % 60)
         self.cut_end.setTime(QTime(h, m, s))
-        self.cut_end.setFixedWidth(80)
-        self.cut_end.setStyleSheet("QTimeEdit { border: 1px solid #cbd5e1; border-radius: 4px; padding: 3px; background-color: white; }")
+        self.cut_end.setFixedWidth(100)
+        self.cut_end.setStyleSheet("QTimeEdit { border: 1.5px solid #3d3660; border-radius: 6px; padding: 3px 6px; background-color: #2c2840; color: #ede9ff; }")
         self.cut_end.timeChanged.connect(lambda: self.stats_changed.emit())
         cut_layout.addWidget(self.cut_end)
         
@@ -225,22 +219,22 @@ class VideoItemWidget(QFrame):
         skip_header_layout.setContentsMargins(0, 4, 0, 0)
         
         skip_label = QLabel("⏭ Bỏ qua đoạn:")
-        skip_label.setStyleSheet("color: #334155; font-weight: 600; font-size: 12px; border: none;")
+        skip_label.setStyleSheet("color: #ede9ff; font-weight: 600; font-size: 12px; border: none;")
         skip_header_layout.addWidget(skip_label)
 
         add_skip_btn = QPushButton("+ Thêm khoảng")
         add_skip_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         add_skip_btn.setStyleSheet("""
             QPushButton {
-                background-color: transparent; 
-                color: #3b82f6; 
-                border: 1px dashed #3b82f6; 
-                border-radius: 4px; 
-                padding: 3px 8px; 
+                background-color: transparent;
+                color: #a78bfa;
+                border: 1px dashed #7c3aed;
+                border-radius: 5px;
+                padding: 3px 8px;
                 font-weight: 600;
                 font-size: 11px;
             }
-            QPushButton:hover { background-color: #eff6ff; }
+            QPushButton:hover { background-color: rgba(139,92,246,0.15); }
         """)
         add_skip_btn.clicked.connect(self.add_skip_range)
         skip_header_layout.addWidget(add_skip_btn)
@@ -255,14 +249,14 @@ class VideoItemWidget(QFrame):
         self.skip_container.setContentsMargins(0, 0, 0, 0)
 
         self.skip_placeholder = QLabel("Chưa có đoạn bỏ qua nào")
-        self.skip_placeholder.setStyleSheet("color: #94a3b8; font-style: italic; font-size: 11px; padding: 4px 0;")
+        self.skip_placeholder.setStyleSheet("color: #5a5278; font-style: italic; font-size: 11px; padding: 4px 0;")
         self.skip_container.addWidget(self.skip_placeholder)
 
         main_layout.addWidget(self.skip_container_widget)
         
         # Stats summary label
         self.stats_label = QLabel()
-        self.stats_label.setStyleSheet("color: #0284c7; font-size: 11px; font-weight: bold; background-color: #f0f9ff; padding: 4px 8px; border-radius: 4px;")
+        self.stats_label.setStyleSheet("color: #a78bfa; font-size: 11px; font-weight: bold; background-color: rgba(139,92,246,0.12); padding: 4px 8px; border-radius: 6px;")
         self.stats_label.hide()
         main_layout.addWidget(self.stats_label)
 
@@ -522,7 +516,7 @@ class AutoCutTab(QWidget):
         
         self.video_scroll_area = QScrollArea()
         self.video_scroll_area.setWidgetResizable(True)
-        self.video_scroll_area.setMinimumHeight(350)
+        self.video_scroll_area.setMinimumHeight(150)
         self.video_scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         
         self.video_items_container = QWidget()
@@ -653,82 +647,85 @@ class AutoCutTab(QWidget):
     def create_settings_group(self):
         group = QGroupBox("")
         layout = QFormLayout()
-        layout.setSpacing(8)
+        layout.setSpacing(10)
+        layout.setContentsMargins(12, 16, 12, 12)
+        layout.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        layout.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        layout.setFormAlignment(Qt.AlignmentFlag.AlignTop)
 
         # Speed
-        speed_widget = QWidget()
-        speed_layout = QHBoxLayout(speed_widget)
-        speed_layout.setContentsMargins(0, 0, 0, 0)
-
         self.speed_input = QDoubleSpinBox()
         self.speed_input.setRange(0.25, 4.0)
         self.speed_input.setValue(1.0)
         self.speed_input.setSingleStep(0.1)
         self.speed_input.setSuffix("x")
+        self.speed_input.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.speed_input.valueChanged.connect(self.update_duration_display)
-        speed_layout.addWidget(self.speed_input)
-        speed_layout.addStretch()
 
-        layout.addRow("Tốc độ video:", speed_widget)
+        layout.addRow("Tốc độ video:", self.speed_input)
 
         # Segment
-        segment_widget = QWidget()
-        segment_layout = QHBoxLayout(segment_widget)
-        segment_layout.setContentsMargins(0, 0, 0, 0)
-
         self.segment_input = QSpinBox()
         self.segment_input.setRange(0, 3600)
         self.segment_input.setValue(0)
         self.segment_input.setSuffix("s")
         self.segment_input.setSpecialValueText("Không cắt")
+        self.segment_input.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.segment_input.valueChanged.connect(self.update_segments_count)
-        segment_layout.addWidget(self.segment_input)
-        segment_layout.addStretch()
 
-        layout.addRow("Cắt mỗi (sau speed):", segment_widget)
+        layout.addRow("Cắt mỗi (sau speed):", self.segment_input)
 
         # Merge Last Segment
         merge_widget = QWidget()
         merge_layout = QHBoxLayout(merge_widget)
         merge_layout.setContentsMargins(0, 0, 0, 0)
-        
+        merge_layout.setSpacing(8)
+
         self.merge_last_checkbox = QCheckBox("Gộp video cuối nếu <")
         self.merge_last_checkbox.setChecked(False)
         self.merge_last_checkbox.toggled.connect(self.update_segments_count)
         merge_layout.addWidget(self.merge_last_checkbox)
-        
+
         self.merge_threshold_input = QSpinBox()
         self.merge_threshold_input.setRange(1, 3600)
         self.merge_threshold_input.setValue(10)
         self.merge_threshold_input.setSuffix("s")
+        self.merge_threshold_input.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.merge_threshold_input.valueChanged.connect(self.update_segments_count)
         merge_layout.addWidget(self.merge_threshold_input)
-        merge_layout.addStretch()
-        
+
         layout.addRow("Tùy chọn gộp:", merge_widget)
 
         # Global Trim (Batch)
         global_trim_widget = QWidget()
         global_trim_layout = QHBoxLayout(global_trim_widget)
         global_trim_layout.setContentsMargins(0, 0, 0, 0)
-        
+        global_trim_layout.setSpacing(8)
+
+        from_lbl = QLabel("Từ:")
+        from_lbl.setFixedWidth(28)
+        global_trim_layout.addWidget(from_lbl)
+
         self.global_trim_start = QSpinBox()
         self.global_trim_start.setRange(0, 3600)
         self.global_trim_start.setValue(0)
         self.global_trim_start.setSuffix("s")
-        self.global_trim_start.setToolTip("Bắt đầu xử lý từ giây thứ N (áp dụng chung cho mọi video).")
-        global_trim_layout.addWidget(QLabel("Từ:"))
+        self.global_trim_start.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.global_trim_start.setToolTip("Bắt đầu xử lý từ giây thứ N (các video chung).")
         global_trim_layout.addWidget(self.global_trim_start)
-        
+
+        tail_lbl = QLabel("Bỏ đuôi:")
+        tail_lbl.setFixedWidth(50)
+        global_trim_layout.addWidget(tail_lbl)
+
         self.global_trim_end = QSpinBox()
         self.global_trim_end.setRange(0, 3600)
         self.global_trim_end.setValue(0)
         self.global_trim_end.setSuffix("s")
-        self.global_trim_end.setToolTip("Cắt bỏ N giây phần cuối của video (áp dụng chung cho mọi video).")
-        global_trim_layout.addWidget(QLabel(" Bỏ đuôi:"))
+        self.global_trim_end.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.global_trim_end.setToolTip("Cắt bỏ N giây phần cuối (các video chung).")
         global_trim_layout.addWidget(self.global_trim_end)
-        
-        global_trim_layout.addStretch()
+
         layout.addRow("Cắt thời gian chung:", global_trim_widget)
 
         # Part settings
@@ -783,7 +780,7 @@ class AutoCutTab(QWidget):
 
         # GPU info label
         self.gpu_info_label = QLabel()
-        self.gpu_info_label.setStyleSheet("color: #7f8c8d; font-size: 8pt; font-style: italic; margin-left: 20px;")
+        self.gpu_info_label.setStyleSheet("color: #64748B; font-size: 8pt; font-style: italic; margin-left: 20px; background: transparent; border: none;")
         gpu_layout.addWidget(self.gpu_info_label)
 
         # Detect GPU on startup
@@ -1282,11 +1279,12 @@ class AutoCutTab(QWidget):
 
         self.duration_display = QLabel("00:00:00")
         self.duration_display.setStyleSheet("""
-            font-weight: bold;
-            color: #27ae60;
-            background-color: #e8f6f3;
-            border-radius: 3px;
-            padding: 3px 8px;
+            font-weight: 700;
+            color: #34D399;
+            background-color: rgba(16,185,129,0.1);
+            border: 1px solid rgba(16,185,129,0.2);
+            border-radius: 5px;
+            padding: 3px 10px;
         """)
         duration_layout.addWidget(self.duration_display)
         duration_layout.addStretch()
@@ -1304,9 +1302,9 @@ class AutoCutTab(QWidget):
 
         self.segments_count = QLabel("1")
         self.segments_count.setStyleSheet("""
-            font-weight: bold;
-            color: #e74c3c;
-            min-width: 20px;
+            font-weight: 700;
+            color: #F87171;
+            min-width: 24px;
             qproperty-alignment: AlignCenter;
         """)
         segments_layout.addWidget(self.segments_count)
@@ -1325,9 +1323,9 @@ class AutoCutTab(QWidget):
 
         self.last_segment_duration_display = QLabel("00:00:00")
         self.last_segment_duration_display.setStyleSheet("""
-            font-weight: bold;
-            color: #8e44ad;
-            min-width: 20px;
+            font-weight: 700;
+            color: #A78BFA;
+            min-width: 24px;
             qproperty-alignment: AlignCenter;
         """)
         last_segment_layout.addWidget(self.last_segment_duration_display)
@@ -1346,9 +1344,9 @@ class AutoCutTab(QWidget):
 
         self.skip_count = QLabel("0")
         self.skip_count.setStyleSheet("""
-            font-weight: bold;
-            color: #f39c12;
-            min-width: 20px;
+            font-weight: 700;
+            color: #FCD34D;
+            min-width: 24px;
             qproperty-alignment: AlignCenter;
         """)
         skip_layout.addWidget(self.skip_count)
@@ -1367,11 +1365,12 @@ class AutoCutTab(QWidget):
 
         self.text_border_info = QLabel("Không có")
         self.text_border_info.setStyleSheet("""
-            font-weight: bold;
-            color: #8e44ad;
-            background-color: #f4ecf7;
-            border-radius: 3px;
-            padding: 3px 8px;
+            font-weight: 700;
+            color: #818CF8;
+            background-color: rgba(99,102,241,0.1);
+            border: 1px solid rgba(99,102,241,0.2);
+            border-radius: 5px;
+            padding: 3px 10px;
         """)
         text_border_layout.addWidget(self.text_border_info)
         text_border_layout.addStretch()
@@ -1381,19 +1380,20 @@ class AutoCutTab(QWidget):
         # Status
         self.status_display = QLabel("🟢 Sẵn sàng")
         self.status_display.setStyleSheet("""
-            font-weight: 500;
-            color: #27ae60;
-            background-color: #e8f6f3;
-            border-radius: 4px;
-            padding: 8px;
-            margin-top: 5px;
+            font-weight: 600;
+            color: #34D399;
+            background-color: rgba(16,185,129,0.1);
+            border: 1px solid rgba(16,185,129,0.2);
+            border-radius: 6px;
+            padding: 8px 12px;
+            margin-top: 4px;
             qproperty-alignment: AlignCenter;
         """)
         layout.addWidget(self.status_display)
 
         # Zoom controls
         zoom_label = QLabel("Zoom Video (Scale):")
-        zoom_label.setStyleSheet("font-weight: bold; color: #2c3e50; margin-top: 10px;")
+        zoom_label.setStyleSheet("font-weight: 700; color: #CBD5E1; margin-top: 8px; background: transparent; border: none;")
         layout.addWidget(zoom_label)
 
         zoom_widget = QWidget()
@@ -1501,7 +1501,7 @@ class AutoCutTab(QWidget):
         self.process_btn = QPushButton("▶️ Start Processing")
         self.process_btn.setObjectName("processButton")
         self.process_btn.setToolTip("Bắt đầu xử lý video với các cài đặt hiện tại")
-        self.process_btn.setFixedHeight(40)
+        self.process_btn.setFixedHeight(50)
         self.process_btn.setStyleSheet("""
             QPushButton {
                 font-size: 14px;
@@ -1522,7 +1522,7 @@ class AutoCutTab(QWidget):
         self.stop_btn = QPushButton("⏹️ Stop Processing")
         self.stop_btn.setObjectName("stopButton")
         self.stop_btn.setToolTip("Dừng quá trình xử lý đang chạy")
-        self.stop_btn.setFixedHeight(40)
+        self.stop_btn.setFixedHeight(50)
         self.stop_btn.setStyleSheet("""
             QPushButton {
                 font-size: 14px;
@@ -1576,16 +1576,7 @@ class AutoCutTab(QWidget):
 
         parent_layout.addWidget(progress_widget)
 
-        # Log
-        log_label = QLabel("Logs:")
-        log_label.setStyleSheet("font-weight: bold; color: #2c3e50; margin-top: 5px;")
-        parent_layout.addWidget(log_label)
-
-        self.log_output = QTextEdit()
-        self.log_output.setReadOnly(True)
-        self.log_output.setMinimumHeight(400)
-        self.log_output.setMaximumHeight(800)
-        parent_layout.addWidget(self.log_output)
+        # Log — removed (routed to global Process Log via signal)
 
 
     def load_fonts(self):
@@ -2110,11 +2101,8 @@ class AutoCutTab(QWidget):
             self.log(f"📁 Đã chọn thư mục xuất: {dirname}")
     
     def log(self, message):
-        """Log message - emit to main window and local log"""
+        """Route all log messages to the global Process Log via signal."""
         self.log_message.emit(message)
-        from datetime import datetime
-        timestamp = datetime.now().strftime("%H:%M:%S")
-        self.log_output.append(f"[{timestamp}] {message}")
     
     def start_processing(self):
         if not hasattr(self, 'video_item_widgets') or not self.video_item_widgets:

@@ -1,10 +1,15 @@
 import os
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, QPushButton, 
-    QLabel, QProgressBar, QSpinBox, QFileDialog, QGroupBox, QMessageBox, QCheckBox, QTextEdit, QScrollArea, QSizePolicy, QComboBox, QDateEdit
+    QWidget, QVBoxLayout, QHBoxLayout, QLineEdit,
+    QLabel, QFileDialog, QGroupBox, QMessageBox, QCheckBox,
+    QTextEdit, QScrollArea, QSizePolicy, QComboBox, QDateEdit, QSpinBox, QPushButton
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QDate
 from core.downloader import ShortsDownloader
+from ui.components import (
+    PrimaryButton, SecondaryButton, DangerButton, GhostButton,
+    SuccessButton, SmallDangerButton, StyledProgressBar, InfoBadge
+)
 
 class FetcherThread(QThread):
     finished = pyqtSignal(list)
@@ -419,19 +424,17 @@ class DownloadTaskWidget(QGroupBox):
         row1.addWidget(self.folder_input, 1) # Give it stretch
         
         self.browse_btn = QPushButton("📁 Browse")
-        self.browse_btn.setFixedWidth(80)
+        self.browse_btn.setFixedWidth(100)
         self.browse_btn.clicked.connect(self.browse_folder)
         row1.addWidget(self.browse_btn)
 
-        row1.addSpacing(10)
-
         if self.remove_callback:
-            self.remove_btn = QPushButton("❌ Xóa")
-            self.remove_btn.setFixedWidth(60)
+            self.remove_btn = SmallDangerButton()
+            self.remove_btn.setFixedSize(60, 28)
+            self.remove_btn.setText("❌ Xóa")
             self.remove_btn.clicked.connect(lambda: self.remove_callback(self))
-            self.remove_btn.setStyleSheet("color: white; background-color: #d9534f; border-radius: 4px; font-weight: bold;")
             row1.addWidget(self.remove_btn)
-            
+
         layout.addLayout(row1)
 
     def _on_content_type_changed(self):
@@ -503,7 +506,7 @@ class DownloaderTab(QWidget):
         # -- Tasks Area (Scrollable) --
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(True)
-        self.scroll_area.setMinimumHeight(500)
+        self.scroll_area.setMinimumHeight(150)
         self.tasks_container = QWidget()
         self.tasks_layout = QVBoxLayout(self.tasks_container)
         self.tasks_layout.setContentsMargins(5, 5, 5, 5)
@@ -517,28 +520,26 @@ class DownloaderTab(QWidget):
         
         tasks_action_container = QWidget()
         tasks_action_layout = QHBoxLayout(tasks_action_container)
-        tasks_action_layout.setContentsMargins(0, 0, 0, 0)
+        tasks_action_layout.setContentsMargins(0, 16, 0, 0)
         tasks_action_layout.setSpacing(10)
         
-        self.add_task_btn = QPushButton("➕ Thêm Tác Vụ")
-        self.add_task_btn.setFixedHeight(40)
-        self.add_task_btn.setStyleSheet("font-size: 13px; font-weight: bold; background-color: #5cb85c; color: white;")
+        self.add_task_btn = SuccessButton("➕ Thêm Tác Vụ")
+        self.add_task_btn.setFixedHeight(50)
         self.add_task_btn.clicked.connect(self.add_task_widget)
         tasks_action_layout.addWidget(self.add_task_btn, 1)
 
-        self.save_cfg_btn = QPushButton("💾 Lưu cấu hình")
-        self.save_cfg_btn.setFixedHeight(40)
-        self.save_cfg_btn.setStyleSheet("font-size: 13px; font-weight: bold; background-color: #f0ad4e; color: white;")
+        self.save_cfg_btn = GhostButton("💾 Lưu cấu hình")
+        self.save_cfg_btn.setFixedHeight(50)
         self.save_cfg_btn.clicked.connect(self.save_config)
         tasks_action_layout.addWidget(self.save_cfg_btn, 1)
 
-        self.load_cfg_btn = QPushButton("📂 Tải cấu hình")
-        self.load_cfg_btn.setFixedHeight(40)
-        self.load_cfg_btn.setStyleSheet("font-size: 13px; font-weight: bold; background-color: #5bc0de; color: white;")
+        self.load_cfg_btn = GhostButton("📂 Tải cấu hình")
+        self.load_cfg_btn.setFixedHeight(50)
         self.load_cfg_btn.clicked.connect(self.load_config)
         tasks_action_layout.addWidget(self.load_cfg_btn, 1)
 
         layout.addWidget(tasks_action_container)
+
 
         # Add initial task
         self.add_task_widget(is_first=True)
@@ -547,7 +548,7 @@ class DownloaderTab(QWidget):
         self.info_label = QLabel("Sẵn sàng.")
         self.info_label.setWordWrap(True)
         self.info_label.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
-        self.info_label.setStyleSheet("color: #888; font-weight: bold;")
+        self.info_label.setStyleSheet("color: #64748B; font-weight: 600; background: transparent; border: none;")
         layout.addWidget(self.info_label)
 
         # -- Global Download Settings --
@@ -566,14 +567,14 @@ class DownloaderTab(QWidget):
         self.workers_spin = QSpinBox()
         self.workers_spin.setRange(1, 20)
         self.workers_spin.setValue(10)
-        self.workers_spin.setFixedWidth(55)
+        self.workers_spin.setFixedWidth(80)
         self.workers_spin.setToolTip("Số luồng tải song song (1-20). Cao quá có thể bị YouTube chặn.")
         row2.addWidget(self.workers_spin)
 
         row2.addStretch()
         
         clear_history_btn = QPushButton("🗑️ Clear History")
-        clear_history_btn.setFixedWidth(120)
+        clear_history_btn.setFixedWidth(140)
         clear_history_btn.clicked.connect(self.clear_download_history)
         clear_history_btn.setToolTip("Xóa toàn bộ lịch sử tải (có xác nhận)")
         row2.addWidget(clear_history_btn)
@@ -594,7 +595,7 @@ class DownloaderTab(QWidget):
             "Khoảng ngày...",
             "... ngày/tháng/năm trở lại",
         ])
-        self.date_filter_cmb.setFixedWidth(140)
+        self.date_filter_cmb.setFixedWidth(210)
         self.date_filter_cmb.setToolTip("Chỉ tải video được đăng trong khoảng thời gian chọn")
         self.date_filter_cmb.currentIndexChanged.connect(self._on_date_filter_changed)
         row_date.addWidget(self.date_filter_cmb)
@@ -605,14 +606,14 @@ class DownloaderTab(QWidget):
         self.date_from.setCalendarPopup(True)
         self.date_from.setDate(QDate.currentDate().addDays(-30))
         self.date_from.setDisplayFormat("dd/MM/yyyy")
-        self.date_from.setFixedWidth(110)
+        self.date_from.setFixedWidth(150)
 
         self.date_to_label = QLabel("Đến:")
         self.date_to = QDateEdit()
         self.date_to.setCalendarPopup(True)
         self.date_to.setDate(QDate.currentDate())
         self.date_to.setDisplayFormat("dd/MM/yyyy")
-        self.date_to.setFixedWidth(110)
+        self.date_to.setFixedWidth(150)
 
         row_date.addWidget(self.date_from_label)
         row_date.addWidget(self.date_from)
@@ -623,10 +624,10 @@ class DownloaderTab(QWidget):
         self.relative_spin = QSpinBox()
         self.relative_spin.setRange(1, 9999)
         self.relative_spin.setValue(30)
-        self.relative_spin.setFixedWidth(65)
+        self.relative_spin.setFixedWidth(100)
         self.relative_unit_cmb = QComboBox()
         self.relative_unit_cmb.addItems(["ngày", "tháng", "năm"])
-        self.relative_unit_cmb.setFixedWidth(70)
+        self.relative_unit_cmb.setFixedWidth(100)
         self.relative_ago_label = QLabel("trở lại")
         row_date.addWidget(self.relative_spin)
         row_date.addWidget(self.relative_unit_cmb)
@@ -647,40 +648,26 @@ class DownloaderTab(QWidget):
         dl_actions_layout.setContentsMargins(0, 0, 0, 0)
         dl_actions_layout.setSpacing(10)
 
-        self.dl_btn = QPushButton("▶ Tải Ngay")
-        self.dl_btn.setFixedHeight(40)
-        self.dl_btn.setStyleSheet("font-size: 14px; font-weight: bold; background-color: #0275d8; color: white;")
+        self.dl_btn = PrimaryButton("▶ Tải Ngay")
+        self.dl_btn.setFixedHeight(50)
         self.dl_btn.clicked.connect(self.start_download)
         dl_actions_layout.addWidget(self.dl_btn, 2)
 
-        self.stop_btn = QPushButton("⏹ Stop")
-        self.stop_btn.setFixedHeight(40)
-        self.stop_btn.setStyleSheet("""
-            QPushButton {
-                font-size: 14px; 
-                font-weight: bold;
-                background-color: #dc3545; 
-                color: white;
-            }
-            QPushButton:disabled {
-                background-color: #6c757d;
-                color: #adb5bd;
-            }
-        """)
+        self.stop_btn = DangerButton("⏹ Stop")
+        self.stop_btn.setFixedHeight(50)
         self.stop_btn.clicked.connect(self.stop_download)
         self.stop_btn.setEnabled(False)
         dl_actions_layout.addWidget(self.stop_btn, 1)
 
-        self.scan_btn = QPushButton("🔍 Quét Dữ Liệu")
-        self.scan_btn.setFixedHeight(40)
-        self.scan_btn.setStyleSheet("font-size: 14px; font-weight: bold; background-color: #5bc0de; color: white;")
+        self.scan_btn = SecondaryButton("🔍 Quét Dữ Liệu")
+        self.scan_btn.setFixedHeight(50)
         self.scan_btn.clicked.connect(self.start_fetch)
         dl_actions_layout.addWidget(self.scan_btn, 1)
 
         layout.addWidget(dl_actions_container)
         
         # -- Progress --
-        self.progress_bar = QProgressBar()
+        self.progress_bar = StyledProgressBar()
         layout.addWidget(self.progress_bar)
         
         # Spacer
