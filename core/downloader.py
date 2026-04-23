@@ -195,7 +195,9 @@ class ShortsDownloader:
                             'title': entry.get('title'),
                             'url': entry.get('url') or f"https://www.youtube.com/watch?v={entry.get('id')}",
                             'duration': entry.get('duration'),
-                            'view_count': entry.get('view_count', 0)
+                            'view_count': entry.get('view_count', 0),
+                            'upload_date': entry.get('upload_date'),  # format: YYYYMMDD or None
+                            'timestamp': entry.get('timestamp'),      # unix timestamp or None
                         })
             return results
             

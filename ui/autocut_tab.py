@@ -2137,7 +2137,8 @@ class AutoCutTab(QWidget):
         # Dọn dẹp cache của distribute nếu có
         if hasattr(self, '_cached_distribute_folders'):
             del self._cached_distribute_folders
-            del self._distribute_index
+        if hasattr(self, '_distribute_assignments'):
+            del self._distribute_assignments
 
         for widget in self.video_item_widgets:
             src_file = widget.path
@@ -2183,23 +2184,74 @@ class AutoCutTab(QWidget):
                     safe_title = title.replace('/', '_').replace('\\', '_').replace(':', '_').replace('*', '_').replace('?', '_').replace('"', '_').replace('<', '_').replace('>', '_').replace('|', '_')
                     dest_dir = os.path.join(out_base, safe_title)
                 elif use_distribute:
-                    # Thu thập các thư mục đã có sẵn trong out_base (chỉ làm 1 lần)
+                    # Thu thập các thư mục đã có sẵn và đếm số lượng video (chỉ làm 1 lần)
                     if not hasattr(self, '_cached_distribute_folders'):
                         try:
-                            self._cached_distribute_folders = sorted([
-                                d for d in os.listdir(out_base) 
-                                if os.path.isdir(os.path.join(out_base, d))
-                            ])
-                            self._distribute_index = 0
-                        except:
+                            subfolders = [d for d in os.listdir(out_base) if os.path.isdir(os.path.join(out_base, d))]
                             self._cached_distribute_folders = []
-                            self._distribute_index = 0
+                            for d in subfolders:
+                                folder_path = os.path.join(out_base, d)
+                                current_count = 0
+                                video_exts = ('.mp4', '.avi', '.mov', '.mkv', '.webm', '.MP4', '.AVI', '.MOV')
+                                try:
+                                    for f in os.listdir(folder_path):
+                                        if f.endswith(video_exts) and os.path.isfile(os.path.join(folder_path, f)):
+                                            current_count += 1
+                                except Exception:
+                                    pass
+                                self._cached_distribute_folders.append({'name': d, 'count': current_count})
+                            
+                            # Tính toán phân bổ tối ưu (LPT - Longest Processing Time first)
+                            if self._cached_distribute_folders:
+                                # Lưu lại số lượng ban đầu để in log
+                                initial_counts = {f['name']: f['count'] for f in self._cached_distribute_folders}
+                                
+                                jobs = []
+                                for idx, w in enumerate(self.video_item_widgets):
+                                    clips = getattr(w, 'calculated_segments', 1)
+                                    if clips <= 0: clips = 1
+                                    jobs.append({'idx': idx, 'clips': clips})
+                                
+                                # Xếp video tạo ra nhiều clip nhất trước để phân bổ công bằng hơn
+                                jobs.sort(key=lambda x: x['clips'], reverse=True)
+                                
+                                self._distribute_assignments = {}
+                                for job in jobs:
+                                    # Tìm folder đang có ít video nhất hiện tại
+                                    best_folder = min(self._cached_distribute_folders, key=lambda x: x['count'])
+                                    self._distribute_assignments[job['idx']] = best_folder['name']
+                                    # Cộng thêm số clip dự kiến vào folder này
+                                    best_folder['count'] += job['clips']
+                                    
+                                # Ghi log chi tiết tổng hợp
+                                self.log("="*45)
+                                self.log("📊 BẢNG TÍNH TOÁN PHÂN BỔ THƯ MỤC")
+                                self.log("="*45)
+                                for f in self._cached_distribute_folders:
+                                    name = f['name']
+                                    initial = initial_counts[name]
+                                    final = f['count']
+                                    added = final - initial
+                                    self.log(f"📁 [{name}]: Có sẵn {initial} video | Nhận thêm {added} clip -> Dự kiến: {final} video")
+                                self.log("="*45)
+                        except Exception as e:
+                            self.log(f"Lỗi tính toán phân bổ folder: {e}")
+                            self._cached_distribute_folders = []
+                            self._distribute_assignments = {}
                     
                     if self._cached_distribute_folders:
-                        target_sub = self._cached_distribute_folders[self._distribute_index % len(self._cached_distribute_folders)]
+                        current_idx = self.video_item_widgets.index(widget)
+                        target_sub = getattr(self, '_distribute_assignments', {}).get(current_idx)
+                        
+                        if not target_sub:
+                            # Fallback an toàn
+                            best_folder = min(self._cached_distribute_folders, key=lambda x: x['count'])
+                            target_sub = best_folder['name']
+                            best_folder['count'] += max(1, getattr(widget, 'calculated_segments', 1))
+                            
                         dest_dir = os.path.join(out_base, target_sub)
-                        self._distribute_index += 1
-                        self.log(f"  Phân phối video '{title}' vào mục: {target_sub}")
+                        estimated_clips = getattr(widget, 'calculated_segments', 1)
+                        self.log(f"  Phân phối video '{title}' ({estimated_clips} clips) vào mục: {target_sub}")
                     else:
                         dest_dir = out_base # Fallback nếu ko có subfolder nào
                 else:

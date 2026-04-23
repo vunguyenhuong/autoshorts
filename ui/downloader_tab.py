@@ -1,9 +1,9 @@
 import os
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, QPushButton, 
-    QLabel, QProgressBar, QSpinBox, QFileDialog, QGroupBox, QMessageBox, QCheckBox, QTextEdit, QScrollArea, QSizePolicy, QComboBox
+    QLabel, QProgressBar, QSpinBox, QFileDialog, QGroupBox, QMessageBox, QCheckBox, QTextEdit, QScrollArea, QSizePolicy, QComboBox, QDateEdit
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QDate
 from core.downloader import ShortsDownloader
 
 class FetcherThread(QThread):
@@ -404,9 +404,9 @@ class DownloadTaskWidget(QGroupBox):
         row1 = QHBoxLayout()
         row1.addWidget(QLabel("Download Top:"))
         self.limit_spin = QSpinBox()
-        self.limit_spin.setRange(1, 999999)
+        self.limit_spin.setRange(0, 999999)
         self.limit_spin.setSpecialValueText("0 (Tất cả)")
-        self.limit_spin.setValue(50)
+        self.limit_spin.setValue(20)
         self.limit_spin.setSuffix(" videos")
         row1.addWidget(self.limit_spin)
 
@@ -579,22 +579,81 @@ class DownloaderTab(QWidget):
         row2.addWidget(clear_history_btn)
         
         dl_layout.addLayout(row2)
+
+        # Date filter row
+        row_date = QHBoxLayout()
+        row_date.addWidget(QLabel("📅 Lọc ngày đăng:"))
+        
+        self.date_filter_cmb = QComboBox()
+        self.date_filter_cmb.addItems([
+            "Không lọc",
+            "Tuần này",
+            "Tháng này",
+            "Năm này",
+            "Từ ngày...",
+            "Khoảng ngày...",
+            "... ngày/tháng/năm trở lại",
+        ])
+        self.date_filter_cmb.setFixedWidth(140)
+        self.date_filter_cmb.setToolTip("Chỉ tải video được đăng trong khoảng thời gian chọn")
+        self.date_filter_cmb.currentIndexChanged.connect(self._on_date_filter_changed)
+        row_date.addWidget(self.date_filter_cmb)
+
+        # Date pickers (shown/hidden based on filter type)
+        self.date_from_label = QLabel("Từ:")
+        self.date_from = QDateEdit()
+        self.date_from.setCalendarPopup(True)
+        self.date_from.setDate(QDate.currentDate().addDays(-30))
+        self.date_from.setDisplayFormat("dd/MM/yyyy")
+        self.date_from.setFixedWidth(110)
+
+        self.date_to_label = QLabel("Đến:")
+        self.date_to = QDateEdit()
+        self.date_to.setCalendarPopup(True)
+        self.date_to.setDate(QDate.currentDate())
+        self.date_to.setDisplayFormat("dd/MM/yyyy")
+        self.date_to.setFixedWidth(110)
+
+        row_date.addWidget(self.date_from_label)
+        row_date.addWidget(self.date_from)
+        row_date.addWidget(self.date_to_label)
+        row_date.addWidget(self.date_to)
+
+        # Relative range: N days/months/years ago
+        self.relative_spin = QSpinBox()
+        self.relative_spin.setRange(1, 9999)
+        self.relative_spin.setValue(30)
+        self.relative_spin.setFixedWidth(65)
+        self.relative_unit_cmb = QComboBox()
+        self.relative_unit_cmb.addItems(["ngày", "tháng", "năm"])
+        self.relative_unit_cmb.setFixedWidth(70)
+        self.relative_ago_label = QLabel("trở lại")
+        row_date.addWidget(self.relative_spin)
+        row_date.addWidget(self.relative_unit_cmb)
+        row_date.addWidget(self.relative_ago_label)
+
+        row_date.addStretch()
+        dl_layout.addLayout(row_date)
+
+        # Hide date pickers initially
+        self._on_date_filter_changed()
+
         dl_group.setLayout(dl_layout)
         layout.addWidget(dl_group)
 
-        # Action Buttons --
+        # Action Buttons -- ▶ Tải Ngay | ⏹ Stop | 🔍 Quét
         dl_actions_container = QWidget()
         dl_actions_layout = QHBoxLayout(dl_actions_container)
         dl_actions_layout.setContentsMargins(0, 0, 0, 0)
         dl_actions_layout.setSpacing(10)
-        
-        self.dl_btn = QPushButton("▶ Start Download")
+
+        self.dl_btn = QPushButton("▶ Tải Ngay")
         self.dl_btn.setFixedHeight(40)
         self.dl_btn.setStyleSheet("font-size: 14px; font-weight: bold; background-color: #0275d8; color: white;")
         self.dl_btn.clicked.connect(self.start_download)
-        dl_actions_layout.addWidget(self.dl_btn, 1)
-        
-        self.stop_btn = QPushButton("⏹ Stop Download")
+        dl_actions_layout.addWidget(self.dl_btn, 2)
+
+        self.stop_btn = QPushButton("⏹ Stop")
         self.stop_btn.setFixedHeight(40)
         self.stop_btn.setStyleSheet("""
             QPushButton {
@@ -611,7 +670,13 @@ class DownloaderTab(QWidget):
         self.stop_btn.clicked.connect(self.stop_download)
         self.stop_btn.setEnabled(False)
         dl_actions_layout.addWidget(self.stop_btn, 1)
-        
+
+        self.scan_btn = QPushButton("🔍 Quét Dữ Liệu")
+        self.scan_btn.setFixedHeight(40)
+        self.scan_btn.setStyleSheet("font-size: 14px; font-weight: bold; background-color: #5bc0de; color: white;")
+        self.scan_btn.clicked.connect(self.start_fetch)
+        dl_actions_layout.addWidget(self.scan_btn, 1)
+
         layout.addWidget(dl_actions_container)
         
         # -- Progress --
@@ -621,6 +686,109 @@ class DownloaderTab(QWidget):
         # Spacer
         layout.addStretch()
     
+    def _on_date_filter_changed(self):
+        """Show/hide date picker widgets based on selected filter"""
+        mode = self.date_filter_cmb.currentText() if hasattr(self, 'date_filter_cmb') else "Không lọc"
+        show_from = mode in ("Từ ngày...", "Khoảng ngày...")
+        show_to = mode == "Khoảng ngày..."
+        show_relative = mode == "... ngày/tháng/năm trở lại"
+        self.date_from_label.setVisible(show_from)
+        self.date_from.setVisible(show_from)
+        self.date_to_label.setVisible(show_to)
+        self.date_to.setVisible(show_to)
+        self.relative_spin.setVisible(show_relative)
+        self.relative_unit_cmb.setVisible(show_relative)
+        self.relative_ago_label.setVisible(show_relative)
+
+    def _apply_date_filter(self, videos):
+        """
+        Filter videos list based on the selected date filter mode.
+        Returns filtered list (all videos if mode is 'Không lọc').
+        upload_date format from yt-dlp: 'YYYYMMDD' string or None.
+        """
+        from datetime import datetime, date, timedelta
+        mode = self.date_filter_cmb.currentText()
+        if mode == "Không lọc":
+            return videos
+
+        today = date.today()
+
+        if mode == "Tuần này":
+            # Monday of current week
+            week_start = today - timedelta(days=today.weekday())
+            date_from = week_start
+            date_to = today
+        elif mode == "Tháng này":
+            date_from = today.replace(day=1)
+            date_to = today
+        elif mode == "Năm này":
+            date_from = today.replace(month=1, day=1)
+            date_to = today
+        elif mode == "Từ ngày...":
+            qd = self.date_from.date()
+            date_from = date(qd.year(), qd.month(), qd.day())
+            date_to = today
+        elif mode == "Khoảng ngày...":
+            qf = self.date_from.date()
+            qt = self.date_to.date()
+            date_from = date(qf.year(), qf.month(), qf.day())
+            date_to = date(qt.year(), qt.month(), qt.day())
+        elif mode == "... ngày/tháng/năm trở lại":
+            n = self.relative_spin.value()
+            unit = self.relative_unit_cmb.currentText()
+            if unit == "ngày":
+                date_from = today - timedelta(days=n)
+            elif unit == "tháng":
+                # approximate: subtract months manually
+                month = today.month - n
+                year = today.year + month // 12
+                month = month % 12
+                if month <= 0:
+                    month += 12
+                    year -= 1
+                import calendar
+                day = min(today.day, calendar.monthrange(year, month)[1])
+                date_from = date(year, month, day)
+            elif unit == "năm":
+                date_from = today.replace(year=today.year - n)
+            else:
+                date_from = today - timedelta(days=n)
+            date_to = today
+        else:
+            return videos
+
+        filtered = []
+        skipped = 0
+        for v in videos:
+            upload_date_str = v.get('upload_date')  # 'YYYYMMDD' or None
+            timestamp = v.get('timestamp')           # unix ts or None
+
+            vid_date = None
+            if upload_date_str and len(upload_date_str) == 8:
+                try:
+                    vid_date = datetime.strptime(upload_date_str, '%Y%m%d').date()
+                except ValueError:
+                    pass
+            if vid_date is None and timestamp:
+                try:
+                    vid_date = datetime.fromtimestamp(timestamp).date()
+                except Exception:
+                    pass
+
+            if vid_date is None:
+                # No date info — keep it to avoid silently dropping
+                filtered.append(v)
+                continue
+
+            if date_from <= vid_date <= date_to:
+                filtered.append(v)
+            else:
+                skipped += 1
+
+        if skipped > 0:
+            self.log_message.emit(f"📅 Bộ lọc ngày: bỏ qua {skipped} video ngoài khoảng [{date_from} → {date_to}]")
+        return filtered
+
     def add_task_widget(self, is_first=False):
         self.task_counter += 1
         widget = DownloadTaskWidget(remove_callback=self.remove_task_widget, task_index=self.task_counter)
@@ -722,9 +890,9 @@ class DownloaderTab(QWidget):
             QMessageBox.critical(self, "Lỗi", f"Không thể tải cấu hình:\n{e}")
 
     # ------------------------------------------------------------------ #
-    #  Start Download: check channels first, then download                 #
+    #  Start Fetch: check channels first
     # ------------------------------------------------------------------ #
-    def start_download(self):
+    def start_fetch(self):
         tasks = []
         for i, w in enumerate(self.task_widgets):
             data = w.get_data()
@@ -738,6 +906,7 @@ class DownloaderTab(QWidget):
 
         self.set_interaction(False)
         self.dl_btn.setEnabled(False)
+        if hasattr(self, 'scan_btn'): self.scan_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
         self.progress_bar.setValue(0)
         self.info_label.setText("🔍 Đang kiểm tra các kênh...")
@@ -761,6 +930,7 @@ class DownloaderTab(QWidget):
             self.info_label.setText("Đã dừng kiểm tra kênh.")
             self.set_interaction(True)
             self.dl_btn.setEnabled(True)
+            if hasattr(self, 'scan_btn'): self.scan_btn.setEnabled(True)
             self.stop_btn.setEnabled(False)
             return
 
@@ -772,36 +942,95 @@ class DownloaderTab(QWidget):
             self.log_message.emit("Không tìm thấy video nào để tải.")
             self.set_interaction(True)
             self.dl_btn.setEnabled(True)
+            if hasattr(self, 'scan_btn'): self.scan_btn.setEnabled(True)
             self.stop_btn.setEnabled(False)
             return
 
-        # Filter out already-downloaded if needed
-        import random
+        # Cập nhật thông tin số lượng
         skip_downloaded = self.skip_downloaded_cb.isChecked()
-        available_videos = []
+        from core.downloader import ShortsDownloader
+        downloader = ShortsDownloader()
+        already_downloaded = 0
         if skip_downloaded:
-            from core.downloader import ShortsDownloader
-            downloader = ShortsDownloader()
             for video in videos:
-                if not downloader.history.is_downloaded(video.get('channel_url'), video['url']):
-                    available_videos.append(video)
-        else:
-            available_videos = videos.copy()
+                if downloader.history.is_downloaded(video.get('channel_url'), video['url']):
+                    already_downloaded += 1
 
-        pending_count = len(available_videos)
-        already_downloaded = total_found - pending_count
+        pending_count = total_found - already_downloaded
         summary_text = (
-            f"✅ Tổng cộng {total_found} video | "
+            f"✅ Tổng quét {total_found} video | "
             f"{already_downloaded} đã tải trước | "
-            f"{pending_count} video chờ tải"
+            f"{pending_count} video sẵn sàng tải"
         )
         self.log_message.emit(summary_text)
         self.info_label.setText(summary_text)
 
-        if not available_videos:
-            QMessageBox.information(self, "Thông báo", "Tất cả video đều đã được tải!")
+        # Nếu được gọi từ "Tải Ngay" khi chưa có dữ liệu → tự động chuyển sang tải
+        if getattr(self, '_pending_download', False):
+            self._pending_download = False
             self.set_interaction(True)
             self.dl_btn.setEnabled(True)
+            if hasattr(self, 'scan_btn'): self.scan_btn.setEnabled(True)
+            self.stop_btn.setEnabled(False)
+            self.start_download()
+            return
+        
+        self.set_interaction(True)
+        self.dl_btn.setEnabled(True)
+        if hasattr(self, 'scan_btn'): self.scan_btn.setEnabled(True)
+        self.stop_btn.setEnabled(False)
+
+    # ------------------------------------------------------------------ #
+    #  Start Download: download from scanned videos
+    # ------------------------------------------------------------------ #
+    def start_download(self):
+        if not hasattr(self, 'videos') or not self.videos:
+            # Chưa có dữ liệu — tự động quét rồi tải
+            self._pending_download = True
+            self.info_label.setText("🔍 Chưa có dữ liệu, đang tự động quét rồi tải...")
+            self.start_fetch()
+            return
+
+        self.set_interaction(False)
+        self.dl_btn.setEnabled(False)
+        if hasattr(self, 'scan_btn'): self.scan_btn.setEnabled(False)
+        self.stop_btn.setEnabled(True)
+        self.progress_bar.setValue(0)
+        
+        # Cập nhật limit từ UI cho từng video vì user có thể đã thay đổi
+        task_limits = {}
+        for i, w in enumerate(self.task_widgets):
+            data = w.get_data()
+            task_limits[i] = data['limit']
+
+        available_videos = []
+        skip_downloaded = self.skip_downloaded_cb.isChecked()
+        from core.downloader import ShortsDownloader
+        downloader = ShortsDownloader()
+        
+        for video in self.videos:
+            tid = video.get('task_id', 0)
+            if tid in task_limits:
+                video['limit'] = task_limits[tid]
+                
+            if skip_downloaded:
+                if not downloader.history.is_downloaded(video.get('channel_url'), video['url']):
+                    available_videos.append(video)
+            else:
+                available_videos.append(video)
+
+        total_found = len(self.videos)
+        pending_count = len(available_videos)
+        already_downloaded = total_found - pending_count
+
+        # Apply date filter
+        available_videos = self._apply_date_filter(available_videos)
+
+        if not available_videos:
+            QMessageBox.information(self, "Thông báo", "Tất cả video đều đã được tải hoặc không có video nào phù hợp với bộ lọc!")
+            self.set_interaction(True)
+            self.dl_btn.setEnabled(True)
+            if hasattr(self, 'scan_btn'): self.scan_btn.setEnabled(True)
             self.stop_btn.setEnabled(False)
             return
 
@@ -863,10 +1092,11 @@ class DownloaderTab(QWidget):
         QMessageBox.critical(self, "Lỗi", f"Không thể kiểm tra kênh: {err}")
         self.set_interaction(True)
         self.dl_btn.setEnabled(True)
+        if hasattr(self, 'scan_btn'): self.scan_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
 
     def stop_download(self):
-        self.log_message.emit("⏹️ Đang dừng quá trình tải...")
+        self.log_message.emit("⏹️ Đang dừng quá trình tải/quét...")
         self.info_label.setText("Đang dừng...")
         self.stop_btn.setEnabled(False)
         if hasattr(self, 'fetcher') and self.fetcher.isRunning():
@@ -885,6 +1115,7 @@ class DownloaderTab(QWidget):
     def _on_download_finished(self, successful, failed):
         self.set_interaction(True)
         self.dl_btn.setEnabled(True)
+        if hasattr(self, 'scan_btn'): self.scan_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
 
         if hasattr(self, 'downloader_thread') and not self.downloader_thread.is_running:
