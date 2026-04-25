@@ -127,11 +127,12 @@ class DownloaderThread(QThread):
 
     WORKERS = 10  # default, overridden by UI spinbox
 
-    def __init__(self, tasks_specs, total_target, skip_downloaded=True, workers=10):
+    def __init__(self, tasks_specs, total_target, skip_downloaded=True, workers=10, date_filter=None):
         super().__init__()
         self.tasks_specs = tasks_specs
         self.total_target = total_target
         self.skip_downloaded = skip_downloaded
+        self.date_filter = date_filter
         self.downloader = ShortsDownloader()
         self.workers = workers
         self.is_running = True
@@ -170,39 +171,86 @@ class DownloaderThread(QThread):
             if self.skip_downloaded and channel_url and \
                     self.downloader.history.is_downloaded(channel_url, url):
                 self.progress.emit(f"{label} ⏭️ Bỏ qua (đã tải): {url}")
-                return True, video
-
-            self.progress.emit(f"{label} ⬇️ Bắt đầu tải: {url}")
+                return 'skipped', video
 
             import yt_dlp
+            from datetime import datetime
 
             # Use the shared proven config from core/downloader.py
             ydl_opts = self.downloader._build_ydl_opts(vid_folder, ffmpeg_location)
             ydl_opts['noprogress'] = True
 
             content_type = video.get('content_type', 'shorts')
-            def resolution_filter(info, *, incomplete):
-                width = info.get('width')
-                height = info.get('height')
-                # Only check if resolution is fully extracted
-                if width and height:
-                    if content_type == 'videos' and width < height:
-                        return f"Bỏ qua (không phải video ngang): {width}x{height}"
-                    elif content_type == 'shorts' and width > height:
-                        return f"Bỏ qua (không phải video dọc): {width}x{height}"
-                return None
-                
-            ydl_opts['match_filter'] = resolution_filter
-
+            
             try:
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    # 1. Extract info without downloading to evaluate filters
+                    info = ydl.extract_info(url, download=False)
+                    if not info:
+                        self.progress.emit(f"{label} ❌ Không lấy được thông tin: {url}")
+                        with lock: failed_urls.append(url)
+                        return 'failed', video
+                    
+                    # 2. Check Resolution Filter
+                    width = info.get('width')
+                    height = info.get('height')
+                    if width and height:
+                        if content_type == 'videos' and width < height:
+                            return 'skipped', video
+                        elif content_type == 'shorts' and width > height:
+                            return 'skipped', video
+                            
+                    # 3. Check Date Filter
+                    udate = info.get('upload_date')
+                    ts = info.get('timestamp')
+                    vid_date = None
+                    date_str = "Không rõ"
+                    
+                    if udate and len(udate) == 8:
+                        try:
+                            vid_date = datetime.strptime(udate, '%Y%m%d').date()
+                            date_str = vid_date.strftime('%d/%m/%Y')
+                        except: pass
+                    if not vid_date and ts:
+                        try:
+                            vid_date = datetime.fromtimestamp(ts).date()
+                            date_str = vid_date.strftime('%d/%m/%Y')
+                        except: pass
+                        
+                    if self.date_filter and self.date_filter.get('mode') != "Không lọc":
+                        df = self.date_filter.get('date_from')
+                        dt = self.date_filter.get('date_to')
+                        if vid_date and df and dt:
+                            if vid_date < df:
+                                with lock:
+                                    tid = video.get('task_id', 0)
+                                    spec = self.tasks_specs[tid]
+                                    spec['old_count'] = spec.get('old_count', 0) + 1
+                                    # Cần 3 video cũ liên tiếp để kích hoạt dừng sớm, tránh nhầm lẫn do video ghim hoặc lỗi thứ tự
+                                    if spec['old_count'] >= 3 and not spec.get('early_stopped'):
+                                        spec['early_stopped'] = True
+                                        spec['queue'].clear()
+                                        self.progress.emit(f"{label} ⏭️ Đã chạm mốc các video cũ hơn {df.strftime('%d/%m/%Y')}. Ngừng quét sâu hơn kênh này.")
+                                return 'skipped', video
+                            elif vid_date > dt:
+                                return 'skipped', video
+                            else:
+                                with lock:
+                                    tid = video.get('task_id', 0)
+                                    self.tasks_specs[tid]['old_count'] = 0
+                                
+                    # 4. If all checks pass, start the download!
+                    self.progress.emit(f"{label} ⬇️ Bắt đầu tải: {url} | Ngày đăng: {date_str}")
+                    
+                    # Do the actual download
                     code = ydl.download([url])
-                ok = (code == 0)
+                    ok = (code == 0)
             except Exception as e:
                 self.progress.emit(f"{label} ❌ Error: {str(e)}")
                 ok = False
+                
             if not self.is_running:
-                return False, video
+                return 'skipped', video
             
             vid_id = video.get('id', '')
             actual_new_file = 'unknown'
@@ -259,12 +307,12 @@ class DownloaderThread(QThread):
             if ok:
                 self.progress.emit(f"{label} ✅ Xong: {actual_new_file}")
                 self.video_downloaded.emit(url)
+                return 'success', video
             else:
                 self.progress.emit(f"{label} ❌ Lỗi tải: {url}")
                 with lock:
                     failed_urls.append(url)
-                
-            return ok, video
+                return 'failed', video
 
         try:
             with concurrent.futures.ThreadPoolExecutor(max_workers=self.workers) as executor:
@@ -291,17 +339,17 @@ class DownloaderThread(QThread):
                     
                     for future in done:
                         try:
-                            ok, video = future.result()
+                            status, video = future.result()
                             tid = video.get('task_id', 0)
                             spec = self.tasks_specs[tid]
                             
                             with lock:
                                 spec['active'] -= 1
-                                if ok:
+                                if status == 'success':
                                     spec['success'] += 1
                                     successful[0] += 1
                                     slots_fulfilled[0] += 1
-                                else:
+                                elif status == 'failed':
                                     spec['failed'] += 1
                                     failed[0] += 1
                                     
@@ -317,6 +365,19 @@ class DownloaderThread(QThread):
                                             permanently_failed[0] += 1
                                             slots_fulfilled[0] += 1
                                             self.progress.emit(f"⚠️ Cạn dự phòng: Tác vụ {tid+1} không còn video nào để tải bù!")
+                                            
+                                elif status == 'skipped':
+                                    # Just pop another video, don't count as failed
+                                    if spec['success'] + spec['active'] < spec['target']:
+                                        if spec['queue']:
+                                            v_new = spec['queue'].pop(0)
+                                            spec['active'] += 1
+                                            new_future = executor.submit(download_one, v_new)
+                                            active_futures.add(new_future)
+                                        else:
+                                            permanently_failed[0] += 1
+                                            slots_fulfilled[0] += 1
+                                            self.progress.emit(f"⚠️ Cạn dự phòng: Tác vụ {tid+1} không còn video phù hợp!")
                                             
                                 pct = int(slots_fulfilled[0] * 100 / self.total_target) if self.total_target > 0 else 100
                                 self.percent.emit(pct)
@@ -901,6 +962,10 @@ class DownloaderTab(QWidget):
         total_urls = sum(len(t['urls']) for t in tasks)
         self.log_message.emit(f"Bắt đầu kiểm tra {total_urls} kênh từ {len(tasks)} tác vụ...")
 
+        self._last_fetched_urls = []
+        for t in tasks:
+            self._last_fetched_urls.extend(t['urls'])
+
         # Step 1: fetch channel video lists
         self.fetcher = FetcherThread(tasks)
         self.fetcher.progress.connect(self._on_fetch_progress)
@@ -971,10 +1036,20 @@ class DownloaderTab(QWidget):
     #  Start Download: download from scanned videos
     # ------------------------------------------------------------------ #
     def start_download(self):
+        current_urls = []
+        for w in self.task_widgets:
+            current_urls.extend(w.get_data()['urls'])
+            
+        needs_fetch = False
         if not hasattr(self, 'videos') or not self.videos:
-            # Chưa có dữ liệu — tự động quét rồi tải
+            needs_fetch = True
+        elif getattr(self, '_last_fetched_urls', None) != current_urls:
+            needs_fetch = True
+            
+        if needs_fetch:
+            # Chưa có dữ liệu hoặc danh sách thay đổi — tự động quét rồi tải
             self._pending_download = True
-            self.info_label.setText("🔍 Chưa có dữ liệu, đang tự động quét rồi tải...")
+            self.info_label.setText("🔍 Cập nhật danh sách kênh, đang quét lại...")
             self.start_fetch()
             return
 
@@ -1010,8 +1085,60 @@ class DownloaderTab(QWidget):
         pending_count = len(available_videos)
         already_downloaded = total_found - pending_count
 
-        # Apply date filter
-        available_videos = self._apply_date_filter(available_videos)
+        # Get date filter parameters
+        from datetime import date, timedelta
+        mode = self.date_filter_cmb.currentText() if hasattr(self, 'date_filter_cmb') else "Không lọc"
+        date_from = None
+        date_to = None
+        
+        today = date.today()
+        if mode == "Tuần này":
+            date_from = today - timedelta(days=today.weekday())
+            date_to = today
+        elif mode == "Tháng này":
+            date_from = today.replace(day=1)
+            date_to = today
+        elif mode == "Năm này":
+            date_from = today.replace(month=1, day=1)
+            date_to = today
+        elif mode == "Từ ngày...":
+            qd = self.date_from.date()
+            date_from = date(qd.year(), qd.month(), qd.day())
+            date_to = today
+        elif mode == "Khoảng ngày...":
+            qf = self.date_from.date()
+            qt = self.date_to.date()
+            date_from = date(qf.year(), qf.month(), qf.day())
+            date_to = date(qt.year(), qt.month(), qt.day())
+        elif mode == "... ngày/tháng/năm trở lại":
+            n = self.relative_spin.value()
+            unit = self.relative_unit_cmb.currentText()
+            if unit == "ngày":
+                date_from = today - timedelta(days=n)
+            elif unit == "tháng":
+                month = today.month - n
+                year = today.year + month // 12
+                month = month % 12
+                if month <= 0:
+                    month += 12
+                    year -= 1
+                import calendar
+                day = min(today.day, calendar.monthrange(year, month)[1])
+                date_from = date(year, month, day)
+            elif unit == "năm":
+                date_from = today.replace(year=today.year - n)
+            else:
+                date_from = today - timedelta(days=n)
+            date_to = today
+
+        date_filter_params = {
+            'mode': mode,
+            'date_from': date_from,
+            'date_to': date_to
+        }
+
+        # Do NOT apply date filter here because we don't have accurate dates yet.
+        # It will be applied dynamically inside DownloaderThread for each video.
 
         if not available_videos:
             QMessageBox.information(self, "Thông báo", "Tất cả video đều đã được tải hoặc không có video nào phù hợp với bộ lọc!")
@@ -1034,7 +1161,30 @@ class DownloaderTab(QWidget):
         import random
         for tid, vids in videos_by_task.items():
             task_limit = vids[0].get('limit', 50)
-            random.shuffle(vids) # Tự trộn tất cả video có sẵn của Tác vụ này vào 1 Biển dự phòng ngẫu nhiên
+            
+            # Chỉ trộn ngẫu nhiên nếu không dùng bộ lọc ngày,
+            # vì lọc ngày cần chạy theo thứ tự thời gian để có thể dừng sớm (early stop)
+            if date_filter_params['mode'] == "Không lọc":
+                random.shuffle(vids)
+            else:
+                # Interleave videos by channel to ensure fair distribution and chronological order
+                by_channel = {}
+                for v in vids:
+                    curl = v.get('channel_url', 'unknown')
+                    if curl not in by_channel:
+                        by_channel[curl] = []
+                    by_channel[curl].append(v)
+                
+                if by_channel:
+                    interleaved = []
+                    max_len = max(len(lst) for lst in by_channel.values())
+                    channel_lists = list(by_channel.values())
+                    for i in range(max_len):
+                        for lst in channel_lists:
+                            if i < len(lst):
+                                interleaved.append(lst[i])
+                    vids = interleaved
+                
             if task_limit <= 0:
                 target = len(vids)
             else:
@@ -1045,7 +1195,8 @@ class DownloaderTab(QWidget):
                 'queue': vids,   
                 'success': 0,
                 'failed': 0,
-                'active': 0
+                'active': 0,
+                'early_stopped': False
             }
             total_target += target
 
@@ -1066,7 +1217,8 @@ class DownloaderTab(QWidget):
             tasks_specs,
             total_target, 
             skip_downloaded=False,  # Already filtered above
-            workers=workers
+            workers=workers,
+            date_filter=date_filter_params
         )
         self.downloader_thread.percent.connect(self.progress_bar.setValue)
         self.downloader_thread.finished.connect(self._on_download_finished)
