@@ -12,7 +12,7 @@ from ui.components import (
 )
 
 class FetcherThread(QThread):
-    finished = pyqtSignal(list)
+    finished = pyqtSignal(list) # (videos)
     error = pyqtSignal(str)
     progress = pyqtSignal(str)
 
@@ -28,12 +28,25 @@ class FetcherThread(QThread):
     def _adjust_channel_url(self, url, content_type):
         """
         Auto-adjust channel URL to point to the correct content type.
-        E.g. if content_type='videos', ensure URL ends with /videos instead of /shorts.
+        If it's already a direct video link, return it as is.
         """
         import re
-        # Strip trailing slash
-        url = url.rstrip('/')
+        url = url.strip().rstrip('/')
         
+        # Check if it's a direct video link
+        # YouTube: watch?v=, /shorts/, youtu.be/
+        # Other platforms are usually direct links too
+        video_patterns = [
+            r'watch\?v=',
+            r'/shorts/',
+            r'youtu\.be/',
+            r'facebook\.com/.+/videos/',
+            r'tiktok\.com/.+/video/'
+        ]
+        if any(re.search(p, url) for p in video_patterns):
+            return url
+
+        # It's a channel link, apply adjustment
         # Remove existing /shorts or /videos suffix
         url = re.sub(r'/(shorts|videos)$', '', url)
         
@@ -74,21 +87,55 @@ class FetcherThread(QThread):
                 folder = task['folder']
                 content_type = task.get('content_type', 'shorts')
                 
-                # Extract channel name for cleaner display
-                display_name = url.split('/')[-1] if '/' in url else url
-                if display_name.lower() in ('shorts', 'reels', 'videos'):
-                    display_name = url.split('/')[-2] if len(url.split('/')) > 1 else url
+                # Check if it's a direct video link
+                import re
+                video_patterns = [r'watch\?v=', r'/shorts/', r'youtu\.be/', r'facebook\.com/.+/videos/', r'tiktok\.com/.+/video/']
+                is_direct_video = any(re.search(p, url) for p in video_patterns)
                 
-                type_label = "📹 Videos" if content_type == 'videos' else "📱 Shorts"
-                self.progress.emit(f"⏳ [{type_label}] Đang kiểm tra {display_name}...")
-                
-                # Each thread needs its own downloader instance to prevent potential issues
-                thread_downloader = ShortsDownloader()
-                # Scan all videos on the channel (limit=None)
-                videos = thread_downloader.check_channel(url, limit=None)
+                if is_direct_video:
+                    self.progress.emit(f"🎯 Nhận diện link video: {url.split('/')[-1][:20]}...")
+                    # Fetch full metadata to get the actual channel URL, view count, etc.
+                    thread_downloader = ShortsDownloader()
+                    info = thread_downloader.get_video_info(url)
+                    
+                    if info:
+                        channel_url = info.get('channel_url')
+                        title = info.get('title', "Direct Video")
+                        video_id = info.get('id', url.split('/')[-1])
+                        view_count = info.get('view_count', 0)
+                    else:
+                        channel_url = None
+                        title = "Direct Video"
+                        video_id = url.split('/')[-1]
+                        view_count = 0
+
+                    videos = [{
+                        'id': video_id,
+                        'url': url,
+                        'title': title,
+                        'view_count': view_count
+                    }]
+                    display_name = "Video Trực Tiếp"
+                else:
+                    # Extract channel name for cleaner display
+                    display_name = url.split('/')[-1] if '/' in url else url
+                    if display_name.lower() in ('shorts', 'reels', 'videos'):
+                        display_name = url.split('/')[-2] if len(url.split('/')) > 1 else url
+                    
+                    type_label = "📹 Videos" if content_type == 'videos' else "📱 Shorts"
+                    self.progress.emit(f"⏳ [{type_label}] Đang quét kênh {display_name}...")
+                    
+                    # Each thread needs its own downloader instance to prevent potential issues
+                    thread_downloader = ShortsDownloader()
+                    # Scan all videos on the channel (limit=None)
+                    videos = thread_downloader.check_channel(url, limit=None)
                 
                 for v in videos:
-                    v['channel_url'] = url
+                    if is_direct_video:
+                        v['channel_url'] = channel_url
+                    else:
+                        v['channel_url'] = url
+                        
                     v['folder'] = folder
                     v['task_id'] = task['task_id']
                     v['limit'] = task['limit']
@@ -113,8 +160,6 @@ class FetcherThread(QThread):
                         all_videos.extend(videos)
                     except Exception as e:
                         url = task['url']
-                        self.progress.emit(f"❌ Lỗi khi kiểm tra {url}: {e}")
-                
             self.finished.emit(all_videos)
         except Exception as e:
             self.error.emit(str(e))
@@ -127,12 +172,13 @@ class DownloaderThread(QThread):
 
     WORKERS = 10  # default, overridden by UI spinbox
 
-    def __init__(self, tasks_specs, total_target, skip_downloaded=True, workers=10, date_filter=None):
+    def __init__(self, tasks_specs, total_target, skip_downloaded=True, workers=10, date_filter=None, selected_language=None):
         super().__init__()
         self.tasks_specs = tasks_specs
         self.total_target = total_target
         self.skip_downloaded = skip_downloaded
         self.date_filter = date_filter
+        self.selected_language = selected_language
         self.downloader = ShortsDownloader()
         self.workers = workers
         self.is_running = True
@@ -174,94 +220,241 @@ class DownloaderThread(QThread):
                 return 'skipped', video
 
             import yt_dlp
+            import re
             from datetime import datetime
 
-            # Use the shared proven config from core/downloader.py
-            ydl_opts = self.downloader._build_ydl_opts(vid_folder, ffmpeg_location)
-            ydl_opts['noprogress'] = True
-
             content_type = video.get('content_type', 'shorts')
-            
+
+            # ── Phase 1: Get metadata for filter checks (resolution, date) ──────────
+            # Use android_vr (no JS runtime needed) just to get basic video info.
+            # This does NOT need to return language-tagged m3u8 formats.
+            info_opts = self.downloader._build_ydl_opts(vid_folder, ffmpeg_location, language=None)
+            info_opts['noprogress'] = True
+
+            info = None
+            date_str = "Không rõ"
+            vid_date = None
+
             try:
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    # 1. Extract info without downloading to evaluate filters
+                with yt_dlp.YoutubeDL(info_opts) as ydl:
                     info = ydl.extract_info(url, download=False)
-                    if not info:
-                        self.progress.emit(f"{label} ❌ Không lấy được thông tin: {url}")
-                        with lock: failed_urls.append(url)
-                        return 'failed', video
-                    
-                    # 2. Check Resolution Filter
-                    width = info.get('width')
-                    height = info.get('height')
-                    if width and height:
-                        if content_type == 'videos' and width < height:
-                            return 'skipped', video
-                        elif content_type == 'shorts' and width > height:
-                            return 'skipped', video
-                            
-                    # 3. Check Date Filter
-                    udate = info.get('upload_date')
-                    ts = info.get('timestamp')
-                    vid_date = None
-                    date_str = "Không rõ"
-                    
-                    if udate and len(udate) == 8:
-                        try:
-                            vid_date = datetime.strptime(udate, '%Y%m%d').date()
-                            date_str = vid_date.strftime('%d/%m/%Y')
-                        except: pass
-                    if not vid_date and ts:
-                        try:
-                            vid_date = datetime.fromtimestamp(ts).date()
-                            date_str = vid_date.strftime('%d/%m/%Y')
-                        except: pass
-                        
-                    if self.date_filter and self.date_filter.get('mode') != "Không lọc":
-                        df = self.date_filter.get('date_from')
-                        dt = self.date_filter.get('date_to')
-                        if vid_date and df and dt:
-                            if vid_date < df:
-                                with lock:
-                                    tid = video.get('task_id', 0)
-                                    spec = self.tasks_specs[tid]
-                                    spec['old_count'] = spec.get('old_count', 0) + 1
-                                    # Cần 3 video cũ liên tiếp để kích hoạt dừng sớm, tránh nhầm lẫn do video ghim hoặc lỗi thứ tự
-                                    if spec['old_count'] >= 3 and not spec.get('early_stopped'):
-                                        spec['early_stopped'] = True
-                                        spec['queue'].clear()
-                                        self.progress.emit(f"{label} ⏭️ Đã chạm mốc các video cũ hơn {df.strftime('%d/%m/%Y')}. Ngừng quét sâu hơn kênh này.")
-                                return 'skipped', video
-                            elif vid_date > dt:
-                                return 'skipped', video
-                            else:
-                                with lock:
-                                    tid = video.get('task_id', 0)
-                                    self.tasks_specs[tid]['old_count'] = 0
-                                
-                    # 4. If all checks pass, start the download!
-                    self.progress.emit(f"{label} ⬇️ Bắt đầu tải: {url} | Ngày đăng: {date_str}")
-                    
-                    # Do the actual download
-                    code = ydl.download([url])
-                    ok = (code == 0)
             except Exception as e:
-                self.progress.emit(f"{label} ❌ Error: {str(e)}")
-                ok = False
+                self.progress.emit(f"{label} ❌ Không lấy được thông tin: {url} — {e}")
+                with lock: failed_urls.append(url)
+                return 'failed', video
+
+            if not info:
+                self.progress.emit(f"{label} ❌ Không lấy được thông tin: {url}")
+                with lock: failed_urls.append(url)
+                return 'failed', video
+
+            if not channel_url:
+                channel_url = info.get('uploader_url') or info.get('channel_url') or info.get('uploader_id')
+            if not video.get('view_count'):
+                video['view_count'] = info.get('view_count', 0)
+
+            # 2. Check Resolution Filter
+            width = info.get('width')
+            height = info.get('height')
+            if width and height:
+                is_direct = video.get('channel_url') is None or "Video Trực Tiếp" in video.get('title', "")
+                
+                if content_type == 'videos' and width < height:
+                    if is_direct:
+                        self.progress.emit(f"{label} ⚠️ Cảnh báo: Video này là định dạng dọc nhưng bạn đang ở chế độ Video ngang. Vẫn tiếp tục tải...")
+                    else:
+                        self.progress.emit(f"{label} ⏭️ Bỏ qua (Video dọc không phù hợp chế độ Video ngang): {url}")
+                        return 'skipped', video
+                elif content_type == 'shorts' and width > height:
+                    if is_direct:
+                        self.progress.emit(f"{label} ⚠️ Cảnh báo: Video này là định dạng ngang nhưng bạn đang ở chế độ Shorts. Vẫn tiếp tục tải...")
+                    else:
+                        self.progress.emit(f"{label} ⏭️ Bỏ qua (Video ngang không phù hợp chế độ Shorts): {url}")
+                        return 'skipped', video
+
+            # 3. Check Date Filter
+            udate = info.get('upload_date')
+            ts = info.get('timestamp')
+
+            if udate and len(udate) == 8:
+                try:
+                    vid_date = datetime.strptime(udate, '%Y%m%d').date()
+                    date_str = vid_date.strftime('%d/%m/%Y')
+                except: pass
+            if not vid_date and ts:
+                try:
+                    vid_date = datetime.fromtimestamp(ts).date()
+                    date_str = vid_date.strftime('%d/%m/%Y')
+                except: pass
+
+            if self.date_filter and self.date_filter.get('mode') != "Không lọc":
+                is_direct = video.get('channel_url') is None or "Video Trực Tiếp" in video.get('title', "")
+                df = self.date_filter.get('date_from')
+                dt = self.date_filter.get('date_to')
+                if vid_date and df and dt and not is_direct:
+                    if vid_date < df:
+                        with lock:
+                            tid = video.get('task_id', 0)
+                            spec = self.tasks_specs[tid]
+                            spec['old_count'] = spec.get('old_count', 0) + 1
+                            if spec['old_count'] >= 3 and not spec.get('early_stopped'):
+                                spec['early_stopped'] = True
+                                spec['queue'].clear()
+                                self.progress.emit(f"{label} ⏭️ Đã chạm mốc các video cũ hơn {df.strftime('%d/%m/%Y')}. Ngừng quét sâu hơn kênh này.")
+                        return 'skipped', video
+                    elif vid_date > dt:
+                        return 'skipped', video
+                    else:
+                        with lock:
+                            tid = video.get('task_id', 0)
+                            self.tasks_specs[tid]['old_count'] = 0
+
+            ok = False
+
+            # ── Phase 2a: Language-specific mode — subprocess yt-dlp + deno ──
+            if self.selected_language and self.selected_language != "Mặc định":
+                # Locate yt-dlp exe that supports deno (media-downloader's version is reliable)
+                MD_YTDLP = r'C:/Users/Vu Nguyen Huong/AppData/Roaming/media-downloader/bin/yt-dlp.exe'
+                MD_DENO  = r'C:/Users/Vu Nguyen Huong/AppData/Roaming/media-downloader/bin/deno.exe'
+                ytdlp_exe = MD_YTDLP if os.path.exists(MD_YTDLP) else self.downloader.get_ytdlp_exe()
+                deno_exe  = MD_DENO  if os.path.exists(MD_DENO)  else None
+
+                # Step A: Run -F to get full format list
+                list_cmd = [ytdlp_exe]
+                if deno_exe:
+                    list_cmd += ['--js-runtimes', f'deno:{deno_exe}']
+                list_cmd += ['--no-playlist', '--quiet', '--no-warnings', '-F', url]
+
+                try:
+                    fmt_result = subprocess.run(list_cmd, capture_output=True, text=True, timeout=60)
+                    fmt_output = fmt_result.stdout + fmt_result.stderr
+                except subprocess.TimeoutExpired:
+                    self.progress.emit(f"{label} ⏭️ Timeout khi lấy format: {url}")
+                    return 'skipped', video
+                except Exception as e:
+                    self.progress.emit(f"{label} ❌ Lỗi lấy format list: {e}")
+                    with lock: failed_urls.append(url)
+                    return 'failed', video
+
+                # Step B: Parse -F output to find best [language] format at 1080p+
+                target_lang = self.selected_language
+                # Create multiple possible tags for better matching
+                possible_tags = [f"[{target_lang}]"]
+                if "-" in target_lang:
+                    possible_tags.append(f"[{target_lang.split('-')[0]}]")
+                
+                chosen_format_id = None
+                best_height = 0
+                for line in fmt_output.splitlines():
+                    if not any(tag in line for tag in possible_tags):
+                        continue
+                    res_match = re.search(r'(\d+)x(\d+)', line)
+                    if not res_match:
+                        continue
+                    w, h = int(res_match.group(1)), int(res_match.group(2))
+                    if w >= 1080 and w > best_height:
+                        best_height = w
+                        parts = line.split()
+                        chosen_format_id = parts[0] if parts else None
+
+                if not chosen_format_id:
+                    self.progress.emit(f"{label} ⏭️ Không có bản {target_lang} 1080p, bỏ qua: {url}")
+                    return 'skipped', video
+
+                self.progress.emit(
+                    f"{label} 🌐 Tìm thấy {target_lang} ID={chosen_format_id} ({best_height}p) | {date_str} → tải..."
+                )
+
+                # Step C: Download with the exact format_id via subprocess
+                outtmpl = os.path.join(vid_folder, '%(title)s [%(id)s].%(ext)s')
+                dl_cmd = [ytdlp_exe]
+                if deno_exe:
+                    dl_cmd += ['--js-runtimes', f'deno:{deno_exe}']
+                dl_cmd += [
+                    '--no-playlist',
+                    '-f', chosen_format_id,
+                    '--merge-output-format', 'mp4',
+                    '-o', outtmpl,
+                    '--no-warnings',
+                    '--retries', '10',
+                    url
+                ]
+                if ffmpeg_location:
+                    dl_cmd += ['--ffmpeg-location', ffmpeg_location]
+
+                try:
+                    dl_result = subprocess.run(dl_cmd, capture_output=True, text=True, timeout=300)
+                    # Don't set ok strictly here, we will check the file later
+                except subprocess.TimeoutExpired:
+                    self.progress.emit(f"{label} ❌ Timeout khi tải: {url}")
+                except Exception as e:
+                    self.progress.emit(f"{label} ❌ Lỗi tải: {e}")
+
+            # ── Phase 2b: Normal mode — Python yt-dlp ────────────────────────────────
+            else:
+                self.progress.emit(f"{label} ⬇️ Bắt đầu tải: {url} | Ngày đăng: {date_str}")
+                dl_opts = self.downloader._build_ydl_opts(vid_folder, ffmpeg_location, language=None)
+                dl_opts['noprogress'] = True
+                try:
+                    with yt_dlp.YoutubeDL(dl_opts) as dl_ydl:
+                        dl_ydl.download([url])
+                except Exception as e:
+                    self.progress.emit(f"{label} ⚠️ Thông báo: {str(e)}")
+
                 
             if not self.is_running:
                 return 'skipped', video
             
+            # --- Robust Success Check: Check for the actual file ---
+            # Give it a small moment for filesystem to settle after merge
+            import time
+            time.sleep(1.5)
+            
             vid_id = video.get('id', '')
             actual_new_file = 'unknown'
-            if ok and vid_id:
+            ok = False 
+            
+            if vid_id:
+                # Try multiple matching strategies
                 for f in os.listdir(vid_folder):
-                    if f"[{vid_id}]." in f and os.path.isfile(os.path.join(vid_folder, f)):
-                        if os.path.getsize(os.path.join(vid_folder, f)) > 0:
+                    f_path = os.path.join(vid_folder, f)
+                    if not os.path.isfile(f_path): continue
+                    
+                    # Strategy 1: Standard yt-dlp "[ID]."
+                    if f"[{vid_id}]." in f:
+                        if os.path.getsize(f_path) > 0:
                             actual_new_file = f
+                            ok = True
                             break
-                if actual_new_file == 'unknown':
-                    ok = False
+                    
+                    # Strategy 2: Filename is just the ID (common in some configs)
+                    if f.startswith(vid_id) and f.endswith(('.mp4', '.mkv', '.webm')):
+                        if os.path.getsize(f_path) > 0:
+                            actual_new_file = f
+                            ok = True
+                            break
+
+            if not ok:
+                # Last ditch effort: find the newest video file in the folder created in last 2 mins
+                try:
+                    now = time.time()
+                    newest_file = None
+                    newest_time = 0
+                    for f in os.listdir(vid_folder):
+                        if f.endswith(('.mp4', '.mkv', '.webm')):
+                            f_path = os.path.join(vid_folder, f)
+                            mtime = os.path.getmtime(f_path)
+                            if (now - mtime) < 150: # created in last 2.5 mins
+                                if mtime > newest_time:
+                                    newest_time = mtime
+                                    newest_file = f
+                    if newest_file:
+                        actual_new_file = newest_file
+                        ok = True
+                except: pass
+
+            if not ok:
+                self.progress.emit(f"{label} ❌ Lỗi: Không tìm thấy file sau khi tải: {url}")
 
             # --- Rename file to clean title ---
             if ok and actual_new_file != 'unknown':
@@ -298,13 +491,23 @@ class DownloaderThread(QThread):
                 except Exception as e:
                     pass # Safely ignore renaming errors and continue with old name
 
-            if ok and channel_url:
-                with lock:
-                    self.downloader.history.add_to_history(
-                        channel_url, url, video.get('view_count', 0)
-                    )
-
             if ok:
+                if channel_url:
+                    with lock:
+                        self.downloader.history.add_to_history(
+                            channel_url, url, video.get('view_count', 0)
+                        )
+                    self.progress.emit(f"{label} 📝 Đã lưu vào lịch sử: {channel_url}")
+                    self.progress.emit(f"📂 File: {os.path.abspath(self.downloader.history.history_file)}")
+                else:
+                    # Fallback: use video URL as channel key if resolution failed
+                    with lock:
+                        self.downloader.history.add_to_history(
+                            "direct_links", url, video.get('view_count', 0)
+                        )
+                    self.progress.emit(f"{label} ⚠️ Lưu vào lịch sử (Direct): {url}")
+                    self.progress.emit(f"📂 File: {os.path.abspath(self.downloader.history.history_file)}")
+
                 self.progress.emit(f"{label} ✅ Xong: {actual_new_file}")
                 self.video_downloaded.emit(url)
                 return 'success', video
@@ -616,12 +819,30 @@ class DownloaderTab(QWidget):
         dl_group = QGroupBox("Global Settings")
         dl_layout = QVBoxLayout()
         
-        # Second row: Skip downloaded, threads count, Clear History
+        # Second row: Skip downloaded, German-only, threads count, Clear History
         row2 = QHBoxLayout()
         self.skip_downloaded_cb = QCheckBox("Bỏ qua video đã tải")
         self.skip_downloaded_cb.setChecked(True)
         self.skip_downloaded_cb.setToolTip("Bỏ qua các video đã được tải từ trước")
         row2.addWidget(self.skip_downloaded_cb)
+
+        row2.addSpacing(20)
+
+        row2.addSpacing(20)
+        row2.addWidget(QLabel("Ngôn ngữ lồng tiếng:"))
+        self.language_cmb = QComboBox()
+        self.language_cmb.addItems([
+            "Mặc định",
+            "en-US",
+            "de-DE",
+            "fr-FR",
+            "ja-JP",
+            "ko-KR",
+            "vi-VN"
+        ])
+        self.language_cmb.setFixedWidth(120)
+        self.language_cmb.setToolTip("Chọn ngôn ngữ lồng tiếng muốn tải (Mặc định là âm thanh gốc)")
+        row2.addWidget(self.language_cmb)
 
         row2.addSpacing(20)
         row2.addWidget(QLabel("Số luồng tải:"))
@@ -1211,6 +1432,10 @@ class DownloaderTab(QWidget):
         )
 
         workers = self.workers_spin.value()
+        selected_language = self.language_cmb.currentText()
+
+        if selected_language != "Mặc định":
+            self.log_message.emit(f"🌐 Bộ lọc ngôn ngữ: {selected_language} đang bật — chỉ tải video có bản lồng tiếng phù hợp.")
 
         # Step 2: download
         self.downloader_thread = DownloaderThread(
@@ -1218,7 +1443,8 @@ class DownloaderTab(QWidget):
             total_target, 
             skip_downloaded=False,  # Already filtered above
             workers=workers,
-            date_filter=date_filter_params
+            date_filter=date_filter_params,
+            selected_language=selected_language
         )
         self.downloader_thread.percent.connect(self.progress_bar.setValue)
         self.downloader_thread.finished.connect(self._on_download_finished)
@@ -1276,5 +1502,7 @@ class DownloaderTab(QWidget):
 
     def set_interaction(self, enabled):
         self.add_task_btn.setEnabled(enabled)
+        if hasattr(self, 'language_cmb'):
+            self.language_cmb.setEnabled(enabled)
         for w in self.task_widgets:
             w.set_enabled(enabled)

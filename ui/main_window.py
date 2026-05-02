@@ -12,6 +12,7 @@ from ui.editor_tab import EditorTab
 from ui.autocut_tab import AutoCutTab
 from ui.adb_tab import AdbTab
 from ui.components import SidebarNavButton, TerminalLog
+from core.downloader import YtdlpUpdater
 import ui.theme as theme
 
 
@@ -218,6 +219,21 @@ class MainWindow(QMainWindow):
             pass
 
         self._build_ui()
+        
+        # ── yt-dlp Auto Update ───────────────────────────────────────────
+        # Determine settings directory
+        import sys
+        if getattr(sys, 'frozen', False):
+            base_dir = os.path.dirname(sys.executable)
+        else:
+            base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        
+        settings_dir = os.path.join(base_dir, "settings")
+        if not os.path.exists(settings_dir):
+            os.makedirs(settings_dir)
+            
+        self.updater = YtdlpUpdater(settings_dir)
+        self.updater.run_update(callback=self.append_log)
 
     def _build_ui(self):
         central = QWidget()
