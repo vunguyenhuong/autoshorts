@@ -34,16 +34,34 @@ class DownloadHistory:
             try:
                 with open(self.history_file, 'r', encoding='utf-8') as f:
                     data = json.load(f)
-                    # Migrate old format to new format if needed
+                    new_data = {}
+                    # Migrate old format to new format and ensure case-insensitivity
                     for channel_key in data:
-                        if isinstance(data[channel_key], list):
-                            # Old format: just a list of URLs
-                            data[channel_key] = {
-                                'videos': data[channel_key],
+                        lower_channel = channel_key.lower()
+                        if lower_channel not in new_data:
+                            new_data[lower_channel] = {
+                                'videos': [],
                                 'view_counts': {}
                             }
-                    return data
-            except:
+                            
+                        if isinstance(data[channel_key], list):
+                            # Old format: just a list of URLs
+                            for v in data[channel_key]:
+                                v_lower = v.lower()
+                                if v_lower not in new_data[lower_channel]['videos']:
+                                    new_data[lower_channel]['videos'].append(v_lower)
+                        else:
+                            # New format
+                            for v in data[channel_key].get('videos', []):
+                                v_lower = v.lower()
+                                if v_lower not in new_data[lower_channel]['videos']:
+                                    new_data[lower_channel]['videos'].append(v_lower)
+                                    
+                            for k, v in data[channel_key].get('view_counts', {}).items():
+                                new_data[lower_channel]['view_counts'][k.lower()] = v
+                    return new_data
+            except Exception as e:
+                print(f"Error loading history: {e}")
                 return {}
         return {}
     
@@ -120,8 +138,8 @@ class DownloadHistory:
         """Normalize URL for consistent comparison"""
         if not url:
             return "__direct__"
-        # Remove trailing slashes and whitespace
-        normalized = url.strip().rstrip('/')
+        # Remove trailing slashes and whitespace, then lowercase for case-insensitive comparison
+        normalized = url.strip().rstrip('/').lower()
         # Remove /shorts or /videos suffix to treat @channel, @channel/shorts, @channel/videos as same
         if normalized.endswith('/shorts'):
             normalized = normalized[:-7]  # Remove '/shorts'
@@ -163,7 +181,10 @@ class YtdlpUpdater:
                 # Try to update
                 if callback: callback(f"{prefix} Checking for updates...")
                 cmd = [self.ytdlp_path, "--update"]
-                process = subprocess.run(cmd, capture_output=True, text=True)
+                kwargs = {'capture_output': True, 'text': True}
+                if os.name == 'nt':
+                    kwargs['creationflags'] = subprocess.CREATE_NO_WINDOW
+                process = subprocess.run(cmd, **kwargs)
                 
                 if "is up to date" in process.stdout or "is up to date" in process.stderr:
                     if callback: callback(f"{prefix} Already up to date.")
@@ -183,7 +204,10 @@ class YtdlpUpdater:
         """Get current version of yt-dlp.exe"""
         try:
             if os.path.exists(self.ytdlp_path):
-                result = subprocess.run([self.ytdlp_path, "--version"], capture_output=True, text=True)
+                kwargs = {'capture_output': True, 'text': True}
+                if os.name == 'nt':
+                    kwargs['creationflags'] = subprocess.CREATE_NO_WINDOW
+                result = subprocess.run([self.ytdlp_path, "--version"], **kwargs)
                 return result.stdout.strip()
         except:
             pass
@@ -290,7 +314,10 @@ class ShortsDownloader:
             cmd.insert(2, f'deno:{MD_DENO}')
             
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=60, encoding='utf-8')
+            kwargs = {'capture_output': True, 'text': True, 'timeout': 60, 'encoding': 'utf-8'}
+            if os.name == 'nt':
+                kwargs['creationflags'] = subprocess.CREATE_NO_WINDOW
+            result = subprocess.run(cmd, **kwargs)
             if result.returncode != 0:
                 return []
                 
