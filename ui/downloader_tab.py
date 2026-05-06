@@ -421,14 +421,14 @@ class DownloaderThread(QThread):
                     if not os.path.isfile(f_path): continue
                     
                     # Strategy 1: Standard yt-dlp "[ID]."
-                    if f"[{vid_id}]." in f:
+                    if f"[{vid_id}]." in f and f.endswith('.mp4'):
                         if os.path.getsize(f_path) > 0:
                             actual_new_file = f
                             ok = True
                             break
                     
                     # Strategy 2: Filename is just the ID (common in some configs)
-                    if f.startswith(vid_id) and f.endswith(('.mp4', '.mkv', '.webm')):
+                    if f.startswith(vid_id) and f.endswith('.mp4'):
                         if os.path.getsize(f_path) > 0:
                             actual_new_file = f
                             ok = True
@@ -441,7 +441,7 @@ class DownloaderThread(QThread):
                     newest_file = None
                     newest_time = 0
                     for f in os.listdir(vid_folder):
-                        if f.endswith(('.mp4', '.mkv', '.webm')):
+                        if f.endswith('.mp4'):
                             f_path = os.path.join(vid_folder, f)
                             mtime = os.path.getmtime(f_path)
                             if (now - mtime) < 150: # created in last 2.5 mins
@@ -491,22 +491,29 @@ class DownloaderThread(QThread):
                 except Exception as e:
                     pass # Safely ignore renaming errors and continue with old name
 
+            # --- Strict Cleanup: Delete any non-mp4 files containing vid_id ---
+            if vid_id:
+                try:
+                    for f in os.listdir(vid_folder):
+                        f_path = os.path.join(vid_folder, f)
+                        if os.path.isfile(f_path) and vid_id in f and not f.endswith('.mp4'):
+                            try:
+                                os.remove(f_path)
+                            except: pass
+                except: pass
+
             if ok:
                 if channel_url:
                     with lock:
                         self.downloader.history.add_to_history(
                             channel_url, url, video.get('view_count', 0)
                         )
-                    self.progress.emit(f"{label} 📝 Đã lưu vào lịch sử: {channel_url}")
-                    self.progress.emit(f"📂 File: {os.path.abspath(self.downloader.history.history_file)}")
                 else:
                     # Fallback: use video URL as channel key if resolution failed
                     with lock:
                         self.downloader.history.add_to_history(
                             "direct_links", url, video.get('view_count', 0)
                         )
-                    self.progress.emit(f"{label} ⚠️ Lưu vào lịch sử (Direct): {url}")
-                    self.progress.emit(f"📂 File: {os.path.abspath(self.downloader.history.history_file)}")
 
                 self.progress.emit(f"{label} ✅ Xong: {actual_new_file}")
                 self.video_downloaded.emit(url)

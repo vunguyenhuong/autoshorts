@@ -71,8 +71,6 @@ class DownloadHistory:
             try:
                 with open(self.history_file, 'w', encoding='utf-8') as f:
                     json.dump(self.history, f, indent=2, ensure_ascii=False)
-                # Print to console for debugging
-                print(f"DEBUG: History saved to {os.path.abspath(self.history_file)}")
             except Exception as e:
                 print(f"Error saving history to {self.history_file}: {e}")
     
@@ -140,6 +138,15 @@ class DownloadHistory:
             return "__direct__"
         # Remove trailing slashes and whitespace, then lowercase for case-insensitive comparison
         normalized = url.strip().rstrip('/').lower()
+        
+        # Standardize http to https
+        if normalized.startswith("http://"):
+            normalized = "https://" + normalized[7:]
+            
+        # Standardize youtube.com to www.youtube.com
+        if normalized.startswith("https://youtube.com/"):
+            normalized = normalized.replace("https://youtube.com/", "https://www.youtube.com/", 1)
+            
         # Remove /shorts or /videos suffix to treat @channel, @channel/shorts, @channel/videos as same
         if normalized.endswith('/shorts'):
             normalized = normalized[:-7]  # Remove '/shorts'
@@ -480,18 +487,24 @@ class ShortsDownloader:
                       Videos without this audio track will be skipped if combined formats are used.
         """
         if language and language != "Mặc định":
-            # BỘ LỌC NGÔN NGỮ: Chỉ tải các bản lồng tiếng phù hợp
-            lang_tag = f"[{language}]"
+            # BỘ LỌC NGÔN NGỮ: Chỉ tải các bản lồng tiếng phù hợp, bắt buộc phải có video
             fmt = (
-                f'best[height>=1080][language={language}]/'
-                f'best[language={language}]/'
-                f'bestvideo[height>=1080]+bestaudio[language={language}]/'
+                f'bestvideo[height>=1080][ext=mp4]+bestaudio[language={language}][ext=m4a]/'
+                f'bestvideo[ext=mp4]+bestaudio[language={language}][ext=m4a]/'
                 f'bestvideo+bestaudio[language={language}]/'
-                'bestvideo[height>=1080]+bestaudio/best' # Fallback
+                f'bestvideo[height>=1080][ext=mp4]+bestaudio[ext=m4a]/'
+                f'bestvideo[ext=mp4]+bestaudio[ext=m4a]/'
+                f'bestvideo+bestaudio/'
+                f'best[vcodec!=none]'
             )
         else:
-            # Chế độ mặc định: tải chất lượng cao nhất, không lọc ngôn ngữ
-            fmt = 'bestvideo[height>=1080]+bestaudio[ext=m4a]/bestvideo+bestaudio/best'
+            # Chế độ mặc định: tải chất lượng cao nhất, bắt buộc phải có video
+            fmt = (
+                'bestvideo[height>=1080][ext=mp4]+bestaudio[ext=m4a]/'
+                'bestvideo[ext=mp4]+bestaudio[ext=m4a]/'
+                'bestvideo+bestaudio/'
+                'best[vcodec!=none]'
+            )
 
         opts = {
             'format': fmt,
@@ -509,7 +522,7 @@ class ShortsDownloader:
                 'User-Agent': 'Mozilla/5.0'
             },
             
-            # Reliability settings
+            # Reliability and Speed settings
             'retries': 10,
             'ignoreerrors': True,
             'no_warnings': True,

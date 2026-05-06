@@ -427,7 +427,7 @@ class EditorTab(QWidget):
         self.workers_spin = QSpinBox()
         self.workers_spin.setRange(1, 16)
         self.workers_spin.setValue(4)
-        self.workers_spin.setFixedWidth(45)
+        self.workers_spin.setFixedWidth(60)
         overlay_layout.addWidget(self.workers_spin)
         
         overlay_group.setLayout(overlay_layout)

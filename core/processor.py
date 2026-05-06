@@ -44,7 +44,7 @@ class ShortsProcessor:
 
     def scan_folder(self, folder, sort_by_views=True, random_order=True):
         """Scan folder and optionally sort by view count or randomize"""
-        valid_exts = ['.mp4', '.mov', '.mkv']
+        valid_exts = ['.mp4', '.mov', '.mkv', '.webm', '.avi', '.m4a']
         files = [
             os.path.join(folder, f) for f in os.listdir(folder) 
             if os.path.splitext(f)[1].lower() in valid_exts
@@ -682,6 +682,34 @@ class ShortsProcessor:
         except Exception:
             return False  # Assume no audio on error
 
+    def _has_video_stream(self, file_path):
+        """
+        Check if video file has a video stream.
+        Returns True if video exists, False otherwise.
+        """
+        import subprocess
+        ffmpeg_exe = self.get_ffmpeg_binary()
+        try:
+            cmd = [ffmpeg_exe, "-hide_banner", "-i", file_path]
+            
+            startupinfo = None
+            if os.name == 'nt':
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+
+            result = subprocess.run(
+                cmd, 
+                stdout=subprocess.PIPE, 
+                stderr=subprocess.PIPE, 
+                text=True, 
+                startupinfo=startupinfo,
+                encoding='utf-8', 
+                errors='replace'
+            )
+            return 'Video:' in result.stderr
+        except Exception:
+            return False
+
     def _probe_dims(self, file_path):
         """
         Probes video dimensions using ffmpeg (since ffprobe might not be aliased).
@@ -766,9 +794,13 @@ class ShortsProcessor:
                     f_path = f_item
                     trim_dur = None
                     
-                # Probe dimensions and audio
+                # Probe dimensions, audio, and video
                 iw, ih = self._probe_dims(f_path)
                 has_audio = self._has_audio_stream(f_path)
+                has_video = self._has_video_stream(f_path)
+                
+                if not has_video and not has_audio:
+                    return i, False, "File has no video or audio stream"
                 
                 # Cover fill: scale the video so that it completely covers the canvas (1080x1920)
                 # This ensures no padding borders are visible by default
@@ -789,37 +821,41 @@ class ShortsProcessor:
                 # Background color hex
                 bg_hex = f"0x{overlay_color[0]:02x}{overlay_color[1]:02x}{overlay_color[2]:02x}" if overlay_opacity > 0 else "0xf0f0f0"
                 
-                # Build video filter parts for the source video
-                vf_parts = [f"setpts=PTS/{speed}"]
-                
-                if hflip:
-                    if i > 0:
-                        import random
-                        if random.choice([True, False]):
-                            vf_parts.append("hflip")
-                    
-                if random_color:
-                    import random
-                    br = round(random.uniform(-0.03, 0.03), 3)
-                    con = round(random.uniform(0.95, 1.05), 3)
-                    sat = round(random.uniform(0.95, 1.10), 3)
-                    vf_parts.append(f"eq=brightness={br}:contrast={con}:saturation={sat}")
-                
-                if film_grain:
-                    vf_parts.append("noise=alls=1:allf=t+u")
-                
-                # Scale video to fit size (like autocut: scale → place on background)
-                vf_parts.append(f"scale={scaled_width}:{scaled_height}:flags=lanczos")
-                
-                vf_chain = ",".join(vf_parts)
-                
-                # Build filter_complex: create background → overlay scaled video on it
-                # This matches autocut's approach: color background + overlay
                 filter_parts = []
-                filter_parts.append(f"[0:v]{vf_chain}[scaled]")
-                filter_parts.append(f"color=c={bg_hex}:s={CW}x{CH}:r=30[bg]")
-                filter_parts.append(f"[bg][scaled]overlay={overlay_x}:{overlay_y}:shortest=1[base]")
                 
+                if has_video:
+                    # Build video filter parts for the source video
+                    vf_parts = [f"setpts=PTS/{speed}"]
+                    
+                    if hflip:
+                        if i > 0:
+                            import random
+                            if random.choice([True, False]):
+                                vf_parts.append("hflip")
+                        
+                    if random_color:
+                        import random
+                        br = round(random.uniform(-0.03, 0.03), 3)
+                        con = round(random.uniform(0.95, 1.05), 3)
+                        sat = round(random.uniform(0.95, 1.10), 3)
+                        vf_parts.append(f"eq=brightness={br}:contrast={con}:saturation={sat}")
+                    
+                    if film_grain:
+                        vf_parts.append("noise=alls=1:allf=t+u")
+                    
+                    # Scale video to fit size (like autocut: scale → place on background)
+                    vf_parts.append(f"scale={scaled_width}:{scaled_height}:flags=lanczos")
+                    
+                    vf_chain = ",".join(vf_parts)
+                    
+                    # Build filter_complex: create background → overlay scaled video on it
+                    filter_parts.append(f"[0:v]{vf_chain}[scaled]")
+                    filter_parts.append(f"color=c={bg_hex}:s={CW}x{CH}:r=30[bg]")
+                    filter_parts.append(f"[bg][scaled]overlay={overlay_x}:{overlay_y}:shortest=1[base]")
+                else:
+                    # No video stream (e.g. m4a file), just create a solid background
+                    filter_parts.append(f"color=c={bg_hex}:s={CW}x{CH}:r=30[base]")
+
                 # Color overlay on top if opacity > 0
                 if overlay_opacity > 0:
                     alpha = overlay_opacity / 100.0
@@ -862,7 +898,7 @@ class ShortsProcessor:
                         "-map", "[v]", "-map", "[a]",
                         "-c:v", "h264_nvenc", "-preset", "p5", "-b:v", "5M",
                         "-pix_fmt", "yuv420p", "-r", "30", "-video_track_timescale", "90000",
-                        "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2",
+                        "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2", "-shortest",
                         temp_file
                     ])
                 else:
@@ -877,7 +913,7 @@ class ShortsProcessor:
                         "-map", "[v]", "-map", "[a]",
                         "-c:v", "libx264", "-preset", "fast", "-crf", "18",
                         "-pix_fmt", "yuv420p", "-r", "30", "-video_track_timescale", "90000",
-                        "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2",
+                        "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2", "-shortest",
                         temp_file
                     ])
                 
@@ -903,7 +939,7 @@ class ShortsProcessor:
                             "-filter_complex", filter_complex,
                             "-map", "[v]", "-map", "[a]",
                             "-c:v", "libx264", "-preset", "fast", "-crf", "18", "-pix_fmt", "yuv420p",
-                            "-c:a", "aac", "-b:a", "128k",
+                            "-c:a", "aac", "-b:a", "128k", "-shortest",
                             temp_file
                         ])
                         result_fb = subprocess.run(cmd_fb, stdout=subprocess.PIPE, stderr=subprocess.PIPE,

@@ -346,8 +346,15 @@ class VideoProcessThread(QThread):
             video_path
         ]
         result = run_ffmpeg_silent(cmd)
-        width, height = map(int, result.stdout.strip().split(','))
-        return width, height
+        stdout = result.stdout.strip()
+        if not stdout:
+            return 0, 0
+            
+        try:
+            width, height = map(int, stdout.split(','))
+            return width, height
+        except Exception:
+            return 0, 0
     
     def calculate_segments(self, total_duration):
         """Calculate segments after removing skip ranges"""
@@ -661,26 +668,73 @@ class VideoProcessThread(QThread):
         
         bg_hex = f"0x{self.bg_color[0]:02x}{self.bg_color[1]:02x}{self.bg_color[2]:02x}"
         
+        is_audio_only = (video_width == 0 or video_height == 0)
+        
         max_width = 1080
-        if video_width > max_width:
-            fit_scale = max_width / video_width
-            fit_width = max_width
-            fit_height = int(video_height * fit_scale)
+        if is_audio_only:
+            scaled_width = 0
+            scaled_height = 0
+            overlay_x = 0
+            overlay_y = 0
         else:
-            fit_width = video_width
-            fit_height = video_height
-        
-        scaled_width = int(fit_width * self.width_scale)
-        scaled_height = int(fit_height * self.height_scale)
-        
-        overlay_x = (1080 - scaled_width) // 2
-        overlay_y = (1920 - scaled_height) // 2
+            if video_width > max_width:
+                fit_scale = max_width / video_width
+                fit_width = max_width
+                fit_height = int(video_height * fit_scale)
+            else:
+                fit_width = video_width
+                fit_height = video_height
+            
+            scaled_width = int(fit_width * self.width_scale)
+            scaled_height = int(fit_height * self.height_scale)
+            
+            overlay_x = (1080 - scaled_width) // 2
+            overlay_y = (1920 - scaled_height) // 2
         
         self.progress.emit(f"📐 Vị trí video trong khung 9:16: x={overlay_x}, y={overlay_y}")
         
         eff_blur = max(1, self.blur_strength / 4)
         
-        if self.speed != 1.0:
+        if is_audio_only:
+            if self.speed != 1.0:
+                filter_complex = (
+                    f"color=c={bg_hex}:s=1080x1920:r=30[bg];"
+                    f"[bg][1:v]overlay=0:0[base];"
+                    f"[0:a]atempo={self.speed}[audio]"
+                )
+                audio_map = ['-map', '[audio]']
+            else:
+                filter_complex = (
+                    f"color=c={bg_hex}:s=1080x1920:r=30[bg];"
+                    f"[bg][1:v]overlay=0:0[base]"
+                )
+                audio_map = ['-map', '0:a?']
+
+            if hasattr(self, 'overlay_opacity') and self.overlay_opacity > 0:
+                alpha = self.overlay_opacity / 100.0
+                overlay_hex = f"0x{self.overlay_color[0]:02x}{self.overlay_color[1]:02x}{self.overlay_color[2]:02x}"
+                filter_complex += f";[base]drawbox=x=0:y=0:w=1080:h=1920:color={overlay_hex}@{alpha}:t=fill[video_with_title]"
+            else:
+                filter_complex += f";[base]copy[video_with_title]"
+                
+            if self.subtitle_file and os.path.exists(self.subtitle_file):
+                subtitle_path_normalized = self.subtitle_file.replace('\\', '/')
+                subtitle_path_escaped = subtitle_path_normalized.replace(':', '\\:')
+                margin_v = 1920 - self.subtitle_y_position
+                subtitle_style = (
+                    f"FontSize={self.subtitle_font_size},"
+                    f"Alignment=2,"
+                    f"MarginV={margin_v},"
+                    f"PrimaryColour=&HFFFFFF,"
+                    f"OutlineColour=&H000000,"
+                    f"Outline=2,"
+                    f"BorderStyle=1"
+                )
+                filter_complex += f";[video_with_title]subtitles='{subtitle_path_escaped}':force_style='{subtitle_style}'[out]"
+            else:
+                filter_complex += ";[video_with_title]null[out]"
+                
+        elif self.speed != 1.0:
             if self.blur_background:
                 filter_complex = (
                     f"[0:v]split=2[fg_source][bg_source];"
@@ -795,12 +849,17 @@ class VideoProcessThread(QThread):
 
         cmd.extend(audio_map)
         cmd.extend(video_codec)
-        cmd.extend([
+        
+        output_args = [
             '-c:a', 'aac', '-b:a', '192k',
             '-movflags', '+faststart',
-            '-pix_fmt', 'yuv420p',
-            output_file
-        ])
+            '-pix_fmt', 'yuv420p'
+        ]
+        if is_audio_only:
+            output_args.append('-shortest')
+        output_args.append(output_file)
+        
+        cmd.extend(output_args)
 
         self.progress.emit(f"🔄 Đang xử lý: {output_file}")
         

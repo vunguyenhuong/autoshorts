@@ -1987,7 +1987,7 @@ class AutoCutTab(QWidget):
                 self,
                 "Chọn video",
                 "",
-                "Video Files (*.mp4 *.avi *.mov *.mkv *.webm);;All Files (*)"
+                "Video Files (*.mp4 *.avi *.mov *.mkv *.webm *.m4a);;All Files (*)"
             )
             if filename:
                 self.process_selected_input(filename, is_dir=False)
@@ -2019,7 +2019,7 @@ class AutoCutTab(QWidget):
             self.video_input.setText(path)
             self.log(f"📂 Đã chọn thư mục: {path}")
             
-            video_extensions = ('.mp4', '.avi', '.mov', '.mkv', '.webm', '.MP4', '.AVI', '.MOV')
+            video_extensions = ('.mp4', '.avi', '.mov', '.mkv', '.webm', '.m4a', '.MP4', '.AVI', '.MOV', '.M4A')
             for root, dirs, files in os.walk(path):
                 for file in files:
                     if file.lower().endswith(video_extensions):
@@ -2180,7 +2180,7 @@ class AutoCutTab(QWidget):
                             for d in subfolders:
                                 folder_path = os.path.join(out_base, d)
                                 current_count = 0
-                                video_exts = ('.mp4', '.avi', '.mov', '.mkv', '.webm', '.MP4', '.AVI', '.MOV')
+                                video_exts = ('.mp4', '.avi', '.mov', '.mkv', '.webm', '.m4a', '.MP4', '.AVI', '.MOV', '.M4A')
                                 try:
                                     for f in os.listdir(folder_path):
                                         if f.endswith(video_exts) and os.path.isfile(os.path.join(folder_path, f)):
