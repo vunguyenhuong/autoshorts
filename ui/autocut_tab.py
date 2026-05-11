@@ -382,8 +382,8 @@ class AutoCutTab(QWidget):
 
         # Variables
         self.video_duration = 0
-        self.bg_color = (240, 240, 240)
-        self.text_bg_color = (30, 30, 30, 200)
+        self.bg_color = (0, 0, 0)
+        self.text_bg_color = (0, 0, 0, 255)
         self.text_color = (255, 255, 255)
         self.text_border_color = (255, 255, 255)  # Màu viền TEXT mặc định (trắng)
         self.text_border_width = 0  # Độ dày viền TEXT mặc định (0 = không có viền)
@@ -471,6 +471,9 @@ class AutoCutTab(QWidget):
         # Ẩn batch folder option khi mặc định là single mode
         if hasattr(self, 'batch_folder_container'):
             self.batch_folder_container.setVisible(False)
+
+        # Auto-load config nếu có
+        self.load_config(silent=True)
 
     def create_header(self, parent_layout):
         """Tạo header đơn giản"""
@@ -618,7 +621,7 @@ class AutoCutTab(QWidget):
         batch_folder_layout.addWidget(self.output_flat_radio)
 
         self.output_subfolder_radio = QRadioButton("Chia folder riêng (tên = tên video)")
-        self.output_subfolder_radio.setToolTip("Mỗi video sẽ được xuất vào subfolder có tên là tiêu đề video đó")
+        self.output_subfolder_radio.setToolTip("Mỗi video sẽ được xuất vào subfolder riêng, tên folder = tên file video gốc (không phải tiêu đề)")
         batch_folder_layout.addWidget(self.output_subfolder_radio)
 
         self.output_distribute_radio = QRadioButton("Mỗi video gốc ánh xạ vào 1 folder có sẵn")
@@ -636,7 +639,7 @@ class AutoCutTab(QWidget):
         # Title Y position
         self.title_y_input = QSpinBox()
         self.title_y_input.setRange(0, 1920)
-        self.title_y_input.setValue(200)
+        self.title_y_input.setValue(250)
         self.title_y_input.setSuffix(" px")
         self.title_y_input.valueChanged.connect(self.update_preview_debounced)
         layout.addRow("Vị trí Tiêu đề (Y):", self.title_y_input)
@@ -759,7 +762,7 @@ class AutoCutTab(QWidget):
         # Part Y position
         self.part_y_input = QSpinBox()
         self.part_y_input.setRange(0, 1920)
-        self.part_y_input.setValue(1600)
+        self.part_y_input.setValue(1450)
         self.part_y_input.setSuffix(" px")
         self.part_y_input.valueChanged.connect(self.update_preview_debounced)
         part_details_layout.addRow("Vị trí Part (Y):", self.part_y_input)
@@ -790,266 +793,6 @@ class AutoCutTab(QWidget):
 
         group.setLayout(layout)
         return group
-    
-    def create_style_group(self):
-        subtitle_header.setStyleSheet("font-weight: bold; color: #2c3e50;")
-        layout.addRow(subtitle_header)
-        
-        # Enable subtitle checkbox
-        self.enable_subtitle_checkbox = QCheckBox("Bật phụ đề tự động")
-        self.enable_subtitle_checkbox.setChecked(False)
-        self.enable_subtitle_checkbox.toggled.connect(self.toggle_subtitle_controls)
-        self.enable_subtitle_checkbox.toggled.connect(self.update_preview)
-        layout.addRow("", self.enable_subtitle_checkbox)
-        
-        # Container for subtitle settings (hidden by default)
-        self.subtitle_settings_container = QWidget()
-        subtitle_settings_layout = QFormLayout(self.subtitle_settings_container)
-        subtitle_settings_layout.setContentsMargins(10, 0, 0, 0)
-        subtitle_settings_layout.setSpacing(8)
-        
-        # Language selection
-        self.subtitle_language_combo = QComboBox()
-        languages = SubtitleGenerator.get_supported_languages()
-        for lang_name, lang_code in languages.items():
-            self.subtitle_language_combo.addItem(lang_name, lang_code)
-        subtitle_settings_layout.addRow("Ngôn ngữ:", self.subtitle_language_combo)
-        
-        # Whisper model size
-        self.whisper_model_combo = QComboBox()
-        models = SubtitleGenerator.get_available_models()
-        model_descriptions = {
-            'tiny': 'Tiny (Nhanh nhất, ~1GB RAM)',
-            'base': 'Base (Cân bằng, ~1GB RAM)',
-            'small': 'Small (Khuyến nghị, ~2GB RAM)',
-            'medium': 'Medium (Chính xác, ~5GB RAM)',
-            'large': 'Large (Tốt nhất, ~10GB RAM)'
-        }
-        for model in models:
-            desc = model_descriptions.get(model, model)
-            self.whisper_model_combo.addItem(desc, model)
-        # Set default to 'small'
-        self.whisper_model_combo.setCurrentIndex(2)
-        subtitle_settings_layout.addRow("Model AI:", self.whisper_model_combo)
-        
-        # Subtitle status (will be updated during processing)
-        self.subtitle_status_label = QLabel("Sẽ tự động tạo khi xử lý video")
-        self.subtitle_status_label.setStyleSheet("color: #7f8c8d; font-size: 8pt; font-style: italic;")
-        subtitle_settings_layout.addRow("Trạng thái:", self.subtitle_status_label)
-        
-        # Separator
-        separator = QFrame()
-        separator.setFrameShape(QFrame.Shape.HLine)
-        separator.setStyleSheet("background-color: #bdc3c7;")
-        subtitle_settings_layout.addRow(separator)
-        
-        # Subtitle styling header
-        style_header = QLabel("Tùy chỉnh hiển thị:")
-        style_header.setStyleSheet("font-weight: bold; color: #2c3e50; margin-top: 5px;")
-        subtitle_settings_layout.addRow(style_header)
-        
-        # Font size
-        font_size_widget = QWidget()
-        font_size_layout = QHBoxLayout(font_size_widget)
-        font_size_layout.setContentsMargins(0, 0, 0, 0)
-        
-        self.subtitle_font_size_slider = QSlider(Qt.Orientation.Horizontal)
-        self.subtitle_font_size_slider.setRange(20, 80)
-        self.subtitle_font_size_slider.setValue(40)
-        self.subtitle_font_size_slider.valueChanged.connect(self.update_subtitle_font_size_display)
-        self.subtitle_font_size_slider.valueChanged.connect(self.update_preview)
-        font_size_layout.addWidget(self.subtitle_font_size_slider, 2)
-        
-        self.subtitle_font_size_label = QLabel("40px")
-        self.subtitle_font_size_label.setFixedWidth(40)
-        self.subtitle_font_size_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        font_size_layout.addWidget(self.subtitle_font_size_label)
-        
-        subtitle_settings_layout.addRow("Cỡ chữ:", font_size_widget)
-        
-        # Y Position
-        self.subtitle_y_position_input = QSpinBox()
-        self.subtitle_y_position_input.setRange(0, 1920)
-        self.subtitle_y_position_input.setValue(1400)
-        self.subtitle_y_position_input.setSuffix(" px")
-        self.subtitle_y_position_input.valueChanged.connect(self.update_preview)
-        subtitle_settings_layout.addRow("Vị trí Y:", self.subtitle_y_position_input)
-        
-        # Subtitle text color
-        subtitle_color_widget = QWidget()
-        subtitle_color_layout = QHBoxLayout(subtitle_color_widget)
-        subtitle_color_layout.setContentsMargins(0, 0, 0, 0)
-        
-        self.subtitle_color_label = QLabel("")
-        self.subtitle_color_label.setProperty("colorPreview", True)
-        self.subtitle_color_label.setStyleSheet(f"background-color: rgb{self.subtitle_color};")
-        subtitle_color_layout.addWidget(self.subtitle_color_label)
-        
-        subtitle_color_btn = QPushButton("⚙️")
-        subtitle_color_btn.setObjectName("colorButton")
-        subtitle_color_btn.clicked.connect(self.select_subtitle_color)
-        subtitle_color_layout.addWidget(subtitle_color_btn)
-        
-        subtitle_settings_layout.addRow("Màu chữ:", subtitle_color_widget)
-        
-        # Subtitle background color
-        subtitle_bg_widget = QWidget()
-        subtitle_bg_layout = QHBoxLayout(subtitle_bg_widget)
-        subtitle_bg_layout.setContentsMargins(0, 0, 0, 0)
-        
-        self.subtitle_bg_label = QLabel("")
-        self.subtitle_bg_label.setProperty("colorPreview", True)
-        self.subtitle_bg_label.setStyleSheet(f"background-color: rgba{self.subtitle_bg_color};")
-        subtitle_bg_layout.addWidget(self.subtitle_bg_label)
-        
-        subtitle_bg_btn = QPushButton("⚙️")
-        subtitle_bg_btn.setObjectName("colorButton")
-        subtitle_bg_btn.clicked.connect(self.select_subtitle_bg_color)
-        subtitle_bg_layout.addWidget(subtitle_bg_btn)
-        
-        subtitle_settings_layout.addRow("Nền chữ:", subtitle_bg_widget)
-        
-        # Border width
-        border_width_widget = QWidget()
-        border_width_layout = QHBoxLayout(border_width_widget)
-        border_width_layout.setContentsMargins(0, 0, 0, 0)
-        
-        self.subtitle_border_slider = QSlider(Qt.Orientation.Horizontal)
-        self.subtitle_border_slider.setRange(0, 5)
-        self.subtitle_border_slider.setValue(2)
-        self.subtitle_border_slider.valueChanged.connect(self.update_subtitle_border_display)
-        self.subtitle_border_slider.valueChanged.connect(self.update_preview)
-        border_width_layout.addWidget(self.subtitle_border_slider, 2)
-        
-        self.subtitle_border_label = QLabel("2px")
-        self.subtitle_border_label.setFixedWidth(40)
-        self.subtitle_border_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        border_width_layout.addWidget(self.subtitle_border_label)
-        
-        subtitle_settings_layout.addRow("Viền chữ:", border_width_widget)
-        
-        layout.addRow(self.subtitle_settings_container)
-        
-        # Initially hide subtitle settings
-        self.subtitle_settings_container.setVisible(False)
-        
-        group.setLayout(layout)
-        return group
-    
-    def toggle_subtitle_controls(self, checked):
-        """Ẩn/hiện các controls của subtitle"""
-        self.subtitle_settings_container.setVisible(checked)
-        self.enable_subtitles = checked
-    
-    def update_subtitle_font_size_display(self, value):
-        """Cập nhật hiển thị font size"""
-        self.subtitle_font_size_label.setText(f"{value}px")
-        self.subtitle_font_size = value
-    
-    def update_subtitle_border_display(self, value):
-        """Cập nhật hiển thị border width"""
-        self.subtitle_border_label.setText(f"{value}px")
-        self.subtitle_border_width = value
-    
-    def select_subtitle_color(self):
-        """Chọn màu chữ subtitle"""
-        color = QColorDialog.getColor(QColor(*self.subtitle_color), self, "Chọn màu chữ subtitle")
-        if color.isValid():
-            self.subtitle_color = (color.red(), color.green(), color.blue())
-            self.subtitle_color_label.setStyleSheet(f"background-color: rgb{self.subtitle_color};")
-            self.update_preview()
-    
-    def select_subtitle_bg_color(self):
-        """Chọn màu nền subtitle"""
-        color = QColorDialog.getColor(
-            QColor(self.subtitle_bg_color[0], self.subtitle_bg_color[1], 
-                   self.subtitle_bg_color[2], self.subtitle_bg_color[3]), 
-            self, "Chọn màu nền subtitle"
-        )
-        if color.isValid():
-            self.subtitle_bg_color = (color.red(), color.green(), color.blue(), color.alpha())
-            self.subtitle_bg_label.setStyleSheet(f"background-color: rgba{self.subtitle_bg_color};")
-            self.update_preview()
-    
-    def generate_subtitles(self):
-        """Tạo phụ đề từ video"""
-        if not self.current_video_path or not os.path.exists(self.current_video_path):
-            QMessageBox.warning(self, "Lỗi", "Vui lòng chọn video trước!")
-            return
-        
-        if self.is_generating_subtitles:
-            QMessageBox.information(self, "Thông báo", "Đang tạo phụ đề, vui lòng đợi...")
-            return
-        
-        self.is_generating_subtitles = True
-        self.generate_subtitle_btn.setEnabled(False)
-        self.subtitle_progress.setVisible(True)
-        self.subtitle_status_label.setText("Đang tạo phụ đề...")
-        self.subtitle_status_label.setStyleSheet("color: #f39c12; font-size: 8pt; font-weight: bold;")
-        
-        # Get settings
-        language_name = self.subtitle_language_combo.currentText()
-        language_code = self.subtitle_language_combo.currentData()
-        model_size = self.whisper_model_combo.currentData()
-        
-        self.log(f"🎤 Bắt đầu tạo phụ đề...")
-        self.log(f"   Ngôn ngữ: {language_name}")
-        self.log(f"   Model: {model_size}")
-        
-        # Create subtitle generator if not exists
-        if self.subtitle_generator is None:
-            try:
-                self.subtitle_generator = SubtitleGenerator(model_size=model_size)
-                self.log(f"✅ Đã khởi tạo Whisper AI (device: {self.subtitle_generator.device.upper()})")
-            except Exception as e:
-                self.log(f"❌ Lỗi khởi tạo Whisper: {str(e)}")
-                self.is_generating_subtitles = False
-                self.generate_subtitle_btn.setEnabled(True)
-                self.subtitle_progress.setVisible(False)
-                self.subtitle_status_label.setText("Lỗi khởi tạo AI")
-                self.subtitle_status_label.setStyleSheet("color: #e74c3c; font-size: 8pt;")
-                QMessageBox.critical(self, "Lỗi", f"Không thể khởi tạo Whisper AI:\n{str(e)}")
-                return
-        
-        # Run transcription in a separate thread (simplified for now - will use QThread later)
-        try:
-            def progress_callback(message):
-                self.log(message)
-            
-            # Transcribe
-            transcription = self.subtitle_generator.transcribe_video(
-                self.current_video_path,
-                language=language_code,
-                use_cache=True,
-                progress_callback=progress_callback
-            )
-            
-            # Generate SRT file
-            output_dir = os.path.dirname(self.current_video_path)
-            srt_filename = os.path.splitext(os.path.basename(self.current_video_path))[0] + ".srt"
-            srt_path = os.path.join(output_dir, srt_filename)
-            
-            self.subtitle_generator.generate_srt(transcription, srt_path)
-            self.current_srt_file = srt_path
-            
-            self.log(f"✅ Đã tạo phụ đề thành công: {srt_filename}")
-            self.subtitle_status_label.setText(f"✅ Đã tạo: {srt_filename}")
-            self.subtitle_status_label.setStyleSheet("color: #27ae60; font-size: 8pt; font-weight: bold;")
-            
-            QMessageBox.information(self, "Thành công", f"Đã tạo phụ đề thành công!\n\nFile: {srt_filename}")
-            
-        except Exception as e:
-            self.log(f"❌ Lỗi tạo phụ đề: {str(e)}")
-            self.subtitle_status_label.setText("❌ Lỗi tạo phụ đề")
-            self.subtitle_status_label.setStyleSheet("color: #e74c3c; font-size: 8pt;")
-            QMessageBox.critical(self, "Lỗi", f"Không thể tạo phụ đề:\n{str(e)}")
-        
-        finally:
-            self.is_generating_subtitles = False
-            self.generate_subtitle_btn.setEnabled(True)
-            self.subtitle_progress.setVisible(False)
-
-
     def create_style_group(self):
         group = QGroupBox("")
         layout = QGridLayout()
@@ -1217,6 +960,59 @@ class AutoCutTab(QWidget):
 
         layout.addWidget(overlay_opacity_widget, 13, 1, 1, 2)
 
+        # --- Save / Load Config buttons ---
+        config_label = QLabel("Cấu hình:")
+        config_label.setStyleSheet("font-weight: bold; color: #2c3e50; margin-top: 10px;")
+        layout.addWidget(config_label, 14, 0, 1, 3)
+
+        config_btn_widget = QWidget()
+        config_btn_layout = QHBoxLayout(config_btn_widget)
+        config_btn_layout.setContentsMargins(0, 0, 0, 0)
+        config_btn_layout.setSpacing(8)
+
+        save_cfg_btn = QPushButton("💾 Lưu cấu hình")
+        save_cfg_btn.setObjectName("saveCfgButton")
+        save_cfg_btn.setToolTip("Lưu tất cả thông số hiện tại (trừ nguồn video & thư mục xuất)")
+        save_cfg_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #4F46E5;
+                color: white;
+                border: none;
+                border-radius: 7px;
+                padding: 6px 10px;
+                font-weight: 600;
+                font-size: 12px;
+            }
+            QPushButton:hover { background-color: #6366F1; }
+            QPushButton:pressed { background-color: #4338CA; }
+        """)
+        save_cfg_btn.clicked.connect(self.save_config)
+        config_btn_layout.addWidget(save_cfg_btn)
+
+        load_cfg_btn = QPushButton("📂 Tải cấu hình")
+        load_cfg_btn.setObjectName("loadCfgButton")
+        load_cfg_btn.setToolTip("Tải lại cấu hình đã lưu")
+        load_cfg_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #F1F3F7;
+                color: #4F46E5;
+                border: 1px solid #CBD5E1;
+                border-radius: 7px;
+                padding: 6px 10px;
+                font-weight: 600;
+                font-size: 12px;
+            }
+            QPushButton:hover {
+                background-color: #E8EBF2;
+                border-color: #6366F1;
+            }
+            QPushButton:pressed { background-color: #E2E8F0; }
+        """)
+        load_cfg_btn.clicked.connect(self.load_config)
+        config_btn_layout.addWidget(load_cfg_btn)
+
+        layout.addWidget(config_btn_widget, 15, 0, 1, 3)
+
         group.setLayout(layout)
         return group
 
@@ -1235,6 +1031,143 @@ class AutoCutTab(QWidget):
 
     def update_blur_strength_display(self, value):
         self.blur_strength_label.setText(str(value))
+
+    # ── Config Save / Load ────────────────────────────────────────────────────
+
+    def _get_config_path(self):
+        """Trả về đường dẫn file config JSON (ngang hàng với exe khi đã build)"""
+        import sys
+        if getattr(sys, "frozen", False):
+            # Đang chạy từ file .exe (PyInstaller) → lưu cạnh exe
+            base = Path(sys.executable).parent / "settings"
+        else:
+            # Đang chạy trong môi trường dev
+            base = Path(__file__).parent.parent / "settings"
+        base.mkdir(parents=True, exist_ok=True)
+        return base / "autocut_config.json"
+
+    def save_config(self):
+        """Lưu tất cả thông số (trừ chế độ xử lý, nguồn video, xuất video) vào JSON"""
+        import json
+        reply = QMessageBox.question(
+            self,
+            "Xác nhận lưu cấu hình",
+            "Bạn có chắc muốn lưu cấu hình hiện tại?\n"
+            "(Cấu hình cũ sẽ bị ghi đè)",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        config = {
+            # Tốc độ & cắt
+            "speed": self.speed_input.value(),
+            "segment_duration": self.segment_input.value(),
+            "merge_last": self.merge_last_checkbox.isChecked(),
+            "merge_threshold": self.merge_threshold_input.value(),
+            "global_trim_start": self.global_trim_start.value(),
+            "global_trim_end": self.global_trim_end.value(),
+            # Part
+            "show_part": self.show_part_checkbox.isChecked(),
+            "part_suffix": self.part_suffix.text(),
+            "part_position": self.part_position_combo.currentData(),
+            "part_y": self.part_y_input.value(),
+            # Vị trí tiêu đề
+            "title_y": self.title_y_input.value(),
+            # GPU
+            "use_gpu": self.gpu_checkbox.isChecked(),
+            # Màu sắc
+            "bg_color": list(self.bg_color),
+            "text_bg_color": list(self.text_bg_color),
+            "text_color": list(self.text_color),
+            "text_border_color": list(self.text_border_color),
+            "text_border_width": self.text_border_width_slider.value(),
+            "overlay_color": list(self.overlay_color),
+            "overlay_opacity": self.overlay_opacity_slider.value(),
+            # Blur
+            "blur_background": self.blur_bg_checkbox.isChecked(),
+            "blur_strength": self.blur_strength_slider.value(),
+            # Zoom
+            "width_scale": self.width_scale_input.value(),
+            "height_scale": self.height_scale_input.value(),
+            # Font
+            "font_index": self.font_combo.currentIndex(),
+        }
+        try:
+            path = self._get_config_path()
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(config, f, indent=2, ensure_ascii=False)
+            self.log(f"✅ Đã lưu cấu hình vào: {path}")
+        except Exception as e:
+            self.log(f"❌ Lỗi lưu cấu hình: {e}")
+
+    def load_config(self, silent=False):
+        """Tải cấu hình từ JSON và áp dụng lên UI"""
+        import json
+        path = self._get_config_path()
+        if not path.exists():
+            if not silent:
+                self.log("⚠️ Chưa có file cấu hình nào được lưu.")
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+
+            # Tốc độ & cắt
+            self.speed_input.setValue(cfg.get("speed", 1.0))
+            self.segment_input.setValue(cfg.get("segment_duration", 0))
+            self.merge_last_checkbox.setChecked(cfg.get("merge_last", False))
+            self.merge_threshold_input.setValue(cfg.get("merge_threshold", 10))
+            self.global_trim_start.setValue(cfg.get("global_trim_start", 0))
+            self.global_trim_end.setValue(cfg.get("global_trim_end", 0))
+            # Part
+            self.show_part_checkbox.setChecked(cfg.get("show_part", True))
+            self.part_suffix.setText(cfg.get("part_suffix", "Part"))
+            pos_data = cfg.get("part_position", "inline")
+            idx = self.part_position_combo.findData(pos_data)
+            if idx >= 0:
+                self.part_position_combo.setCurrentIndex(idx)
+            self.part_y_input.setValue(cfg.get("part_y", 1450))
+            # Vị trí tiêu đề
+            self.title_y_input.setValue(cfg.get("title_y", 250))
+            # GPU
+            self.gpu_checkbox.setChecked(cfg.get("use_gpu", True))
+            # Màu sắc
+            if "bg_color" in cfg:
+                self.bg_color = tuple(cfg["bg_color"])
+                self.bg_color_label.setStyleSheet(f"background-color: rgb{self.bg_color};")
+            if "text_bg_color" in cfg:
+                self.text_bg_color = tuple(cfg["text_bg_color"])
+                self.text_bg_label.setStyleSheet(f"background-color: rgba{self.text_bg_color};")
+            if "text_color" in cfg:
+                self.text_color = tuple(cfg["text_color"])
+                self.text_color_label.setStyleSheet(f"background-color: rgb{self.text_color};")
+            if "text_border_color" in cfg:
+                self.text_border_color = tuple(cfg["text_border_color"])
+                self.text_border_color_label.setStyleSheet(f"background-color: rgb{self.text_border_color};")
+            self.text_border_width_slider.setValue(cfg.get("text_border_width", 0))
+            if "overlay_color" in cfg:
+                self.overlay_color = tuple(cfg["overlay_color"])
+                self.overlay_color_label.setStyleSheet(f"background-color: rgb{self.overlay_color};")
+            self.overlay_opacity_slider.setValue(cfg.get("overlay_opacity", 0))
+            # Blur
+            self.blur_bg_checkbox.setChecked(cfg.get("blur_background", False))
+            self.blur_strength_slider.setValue(cfg.get("blur_strength", 40))
+            # Zoom
+            self.width_scale_input.setValue(cfg.get("width_scale", 1.0))
+            self.height_scale_input.setValue(cfg.get("height_scale", 1.0))
+            # Font
+            font_idx = cfg.get("font_index", 0)
+            if 0 <= font_idx < self.font_combo.count():
+                self.font_combo.setCurrentIndex(font_idx)
+
+            if not silent:
+                self.log(f"✅ Đã tải cấu hình từ: {path}")
+        except Exception as e:
+            if not silent:
+                self.log(f"❌ Lỗi tải cấu hình: {e}")
+
+    # ── End Config ────────────────────────────────────────────────────────────
 
     def update_part_ui(self):
         """Ẩn/hiện cấu hình part"""
@@ -1889,7 +1822,7 @@ class AutoCutTab(QWidget):
     def select_text_bg_color(self):
         color = QColorDialog.getColor(QColor(*self.text_bg_color[:3]))
         if color.isValid():
-            self.text_bg_color = (color.red(), color.green(), color.blue(), 180)
+            self.text_bg_color = (color.red(), color.green(), color.blue(), 255)
             self.text_bg_label.setStyleSheet(f"background-color: rgba{self.text_bg_color};")
             self.log(f"Đã chọn màu nền chữ: RGB{self.text_bg_color[:3]}")
             if self.current_video_path:
@@ -2168,9 +2101,10 @@ class AutoCutTab(QWidget):
                 use_distribute = hasattr(self, 'output_distribute_radio') and self.output_distribute_radio.isChecked()
                 
                 if use_subfolder:
-                    # Mỗi video xuất vào subfolder tên = tiêu đề video
-                    safe_title = title.replace('/', '_').replace('\\', '_').replace(':', '_').replace('*', '_').replace('?', '_').replace('"', '_').replace('<', '_').replace('>', '_').replace('|', '_')
-                    dest_dir = os.path.join(out_base, safe_title)
+                    # Mỗi video xuất vào subfolder tên = tên file video gốc (stem)
+                    video_stem = Path(src_file).stem
+                    safe_stem = video_stem.replace('/', '_').replace('\\', '_').replace(':', '_').replace('*', '_').replace('?', '_').replace('"', '_').replace('<', '_').replace('>', '_').replace('|', '_')
+                    dest_dir = os.path.join(out_base, safe_stem)
                 elif use_distribute:
                     # Thu thập các thư mục đã có sẵn và đếm số lượng video (chỉ làm 1 lần)
                     if not hasattr(self, '_cached_distribute_folders'):
@@ -2310,107 +2244,7 @@ class AutoCutTab(QWidget):
         
         # Generate subtitles automatically if enabled
         subtitle_file_to_use = None
-        if self.enable_subtitles:
-            self.log("🎤 Phụ đề được bật - bắt đầu tạo phụ đề tự động...")
-            
-            # Update progress bar to show subtitle generation
-            self.progress_bar.setMaximum(0)  # Indeterminate mode
-            self.progress_label.setText("Đang tạo phụ đề tự động...")
-            self.status_display.setText("🟡 Đang tạo phụ đề...")
-            
-            self.subtitle_status_label.setText("Đang tạo phụ đề...")
-            self.subtitle_status_label.setStyleSheet("color: #f39c12; font-size: 8pt; font-weight: bold;")
-            
-            # Get subtitle settings
-            language_code = self.subtitle_language_combo.currentData()
-            language_name = self.subtitle_language_combo.currentText()
-            model_size = self.whisper_model_combo.currentData()
-            
-            self.log(f"   Ngôn ngữ: {language_name}")
-            self.log(f"   Model: {model_size}")
-            
-            # Force UI update
-            QApplication.processEvents()
-            
-            try:
-                # Create subtitle generator if not exists
-                if self.subtitle_generator is None or self.subtitle_generator.model_size != model_size:
-                    self.progress_label.setText(f"Đang tải Whisper AI model ({model_size})...")
-                    QApplication.processEvents()
-                    
-                    self.subtitle_generator = SubtitleGenerator(model_size=model_size)
-                    self.log(f"✅ Đã khởi tạo Whisper AI (device: {self.subtitle_generator.device.upper()})")
-                
-                def progress_callback(message):
-                    self.log(message)
-                    # Update progress label with current step
-                    if "Extracting audio" in message:
-                        self.progress_label.setText("Đang trích xuất audio từ video...")
-                    elif "Transcribing audio" in message:
-                        self.progress_label.setText("Đang nhận dạng giọng nói (có thể mất vài phút)...")
-                    elif "Using cached" in message:
-                        self.progress_label.setText("Sử dụng phụ đề đã cache...")
-                    elif "Transcription complete" in message:
-                        self.progress_label.setText("Đang tạo file SRT...")
-                    QApplication.processEvents()  # Update UI
-                
-                # Transcribe video
-                self.progress_label.setText("Đang phân tích video...")
-                QApplication.processEvents()
-                
-                transcription = self.subtitle_generator.transcribe_video(
-                    src_file,
-                    language=language_code,
-                    use_cache=True,
-                    progress_callback=progress_callback
-                )
-                
-                # Generate SRT file
-                self.progress_label.setText("Đang tạo file phụ đề SRT...")
-                QApplication.processEvents()
-                
-                output_dir = os.path.dirname(src_file)
-                srt_filename = os.path.splitext(os.path.basename(src_file))[0] + ".srt"
-                srt_path = os.path.join(output_dir, srt_filename)
-                
-                self.subtitle_generator.generate_srt(transcription, srt_path)
-                subtitle_file_to_use = srt_path
-                
-                self.log(f"✅ Đã tạo phụ đề: {srt_filename}")
-                self.subtitle_status_label.setText(f"✅ Đã tạo: {srt_filename}")
-                self.subtitle_status_label.setStyleSheet("color: #27ae60; font-size: 8pt; font-weight: bold;")
-                
-                # Reset progress bar
-                self.progress_bar.setMaximum(100)
-                self.progress_label.setText("Chuẩn bị xử lý video...")
-                self.status_display.setText("🟡 Đang xử lý...")
-                QApplication.processEvents()
-                
-            except Exception as e:
-                self.log(f"❌ Lỗi tạo phụ đề: {str(e)}")
-                self.subtitle_status_label.setText("❌ Lỗi tạo phụ đề")
-                self.subtitle_status_label.setStyleSheet("color: #e74c3c; font-size: 8pt;")
-                
-                # Reset progress bar
-                self.progress_bar.setMaximum(100)
-                
-                # Ask user if they want to continue without subtitles
-                reply = QMessageBox.question(
-                    self, 
-                    "Lỗi tạo phụ đề",
-                    f"Không thể tạo phụ đề:\n{str(e)}\n\nBạn có muốn tiếp tục xử lý video không có phụ đề?",
-                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-                )
-                
-                if reply == QMessageBox.StandardButton.No:
-                    # Reset UI
-                    self.process_btn.setEnabled(True)
-                    self.process_btn.setText("▶️ BẮT ĐẦU XỬ LÝ")
-                    self.stop_btn.setEnabled(False)
-                    self.progress_bar.setVisible(False)
-                    self.status_display.setText("🔴 Đã hủy")
-                    self.progress_label.setText("Đã hủy do lỗi tạo phụ đề")
-                    return
+        # (Subtitle feature is currently disabled)
         
         # Determine original sizes for the current video to allow correct zoom (each video might have different dimensions)
         try:
@@ -2457,10 +2291,10 @@ class AutoCutTab(QWidget):
             overlay_color=self.overlay_color,
             overlay_opacity=self.overlay_opacity,
             
-            # Subtitle parameters - use the generated subtitle file
+            # Subtitle parameters (subtitle feature is disabled, file=None)
             subtitle_file=subtitle_file_to_use,
             subtitle_font_size=self.subtitle_font_size,
-            subtitle_y_position=self.subtitle_y_position_input.value() if hasattr(self, 'subtitle_y_position_input') else 1400
+            subtitle_y_position=1400
         )
         
         self.thread.progress.connect(self.update_progress)

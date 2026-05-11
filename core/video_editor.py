@@ -565,12 +565,25 @@ class VideoProcessThread(QThread):
         except Exception as e:
             self.finished.emit(False, f"❌ Lỗi: {str(e)}")
         finally:
-            if 'title_path' in locals() and os.path.exists(title_path):
-                try:
-                    os.remove(title_path)
-                    print(f"🧹 Đã dọn dẹp file tạm: {title_path}")
-                except:
-                    pass
+            # Dọn dẹp TẤT CẢ file tạm trong output_dir
+            if 'title_path' in locals() and hasattr(self, 'output_dir') and os.path.exists(self.output_dir):
+                import glob
+                temp_patterns = [
+                    os.path.join(self.output_dir, "title_overlay.png"),
+                    os.path.join(self.output_dir, "title_part_*.png"),
+                    os.path.join(self.output_dir, "temp_*.mp4"),
+                    os.path.join(self.output_dir, "temp_merged.mp4"),
+                    os.path.join(self.output_dir, "concat_list.txt"),
+                ]
+                for pattern in temp_patterns:
+                    for f in glob.glob(pattern):
+                        for _ in range(5):
+                            try:
+                                os.remove(f)
+                                break
+                            except OSError:
+                                import time
+                                time.sleep(0.3)
     
     def create_segment_from_ranges(self, time_ranges, start_offset, duration_needed, 
                                    title_image, output_file, video_width, video_height):

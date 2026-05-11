@@ -1287,11 +1287,13 @@ class DownloaderTab(QWidget):
         self.stop_btn.setEnabled(True)
         self.progress_bar.setValue(0)
         
-        # Cập nhật limit từ UI cho từng video vì user có thể đã thay đổi
+        # Cập nhật limit VÀ folder từ UI cho từng video vì user có thể đã thay đổi
         task_limits = {}
+        task_folders = {}
         for i, w in enumerate(self.task_widgets):
             data = w.get_data()
             task_limits[i] = data['limit']
+            task_folders[i] = data['folder']  # Luôn lấy folder mới nhất từ UI
 
         available_videos = []
         skip_downloaded = self.skip_downloaded_cb.isChecked()
@@ -1302,6 +1304,8 @@ class DownloaderTab(QWidget):
             tid = video.get('task_id', 0)
             if tid in task_limits:
                 video['limit'] = task_limits[tid]
+            if tid in task_folders:
+                video['folder'] = task_folders[tid]  # Ghi đè folder bằng giá trị hiện tại từ UI
                 
             if skip_downloaded:
                 if not downloader.history.is_downloaded(video.get('channel_url'), video['url']):

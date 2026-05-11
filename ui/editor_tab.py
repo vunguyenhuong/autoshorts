@@ -336,6 +336,11 @@ class EditorTab(QWidget):
         self.duration_over_1min.toggled.connect(self.update_estimation_debounced)
         duration_layout.addWidget(self.duration_over_1min)
         
+        self.duration_free = QRadioButton("Gộp thường (không cắt)")
+        self.duration_free.setToolTip("Gộp video mà không cắt hay giới hạn thời lượng — video > 1 phút vẫn được giữ nguyên")
+        self.duration_free.toggled.connect(self.update_estimation_debounced)
+        duration_layout.addWidget(self.duration_free)
+        
         param_layout.addWidget(self.duration_container)
         param_group.setLayout(param_layout)
         layout.addWidget(param_group)
@@ -561,7 +566,12 @@ class EditorTab(QWidget):
                 self.log_message.emit(f"Đã chọn màu lớp phủ: RGB{self.overlay_color}")
 
     def get_target_duration(self):
-        return 55 if self.duration_under_1min.isChecked() else 60
+        if self.duration_under_1min.isChecked():
+            return 55
+        elif self.duration_free.isChecked():
+            return 60  # Dùng 60s làm target mặc định nhưng không giới hạn
+        else:
+            return 60
     
     def get_current_settings(self):
         return {
@@ -574,7 +584,7 @@ class EditorTab(QWidget):
             'skip_merge': self.skip_merge_checkbox.isChecked(),
             'sort_by_views': self.sort_by_views_radio.isChecked(),
             'target_duration': self.get_target_duration(),
-            'duration_mode': 'max' if self.duration_under_1min.isChecked() else 'min',
+            'duration_mode': 'max' if self.duration_under_1min.isChecked() else ('free' if self.duration_free.isChecked() else 'min'),
             'overlay_color': self.overlay_color,
             'overlay_opacity': self.overlay_opacity,
             'workers': self.workers_spin.value(),
@@ -625,6 +635,7 @@ class EditorTab(QWidget):
         
         skip_merge = self.skip_merge_checkbox.isChecked()
         target_duration = self.get_target_duration()
+        is_free_mode = hasattr(self, 'duration_free') and self.duration_free.isChecked()
         
         valid_tasks = 0
         total_estimated = 0
@@ -643,7 +654,10 @@ class EditorTab(QWidget):
             self.global_est_label.setText(f"📋 Tổng quát: Sẽ có {total_videos} video độc lập được xuất ra từ {valid_tasks} tác vụ.")
         else:
             can_run = total_estimated > 0
-            self.global_est_label.setText(f"📋 Tổng quát: Dự kiến xuất {total_estimated} clip dài (~{target_duration}s) từ tổng số {total_videos} video gốc.")
+            if is_free_mode:
+                self.global_est_label.setText(f"📋 Tổng quát: Dự kiến xuất {total_estimated} clip gộp (không giới hạn thời lượng) từ tổng số {total_videos} video gốc.")
+            else:
+                self.global_est_label.setText(f"📋 Tổng quát: Dự kiến xuất {total_estimated} clip dài (~{target_duration}s) từ tổng số {total_videos} video gốc.")
             
         self.run_btn.setEnabled(can_run)
 

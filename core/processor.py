@@ -185,9 +185,10 @@ class ShortsProcessor:
                             continue
                             
                         trim_long_videos = settings.get('trim_long_videos', False)
-                        # If >= 60s and (trim_long_videos or not skip_merge), we randomly cut it to < 60s. For estimation, use expected average (e.g. 45s).
-                        if dur >= 60 and (trim_long_videos or not skip_merge):
-                            dur = 45.0
+                        # In 'free' mode, keep video as-is (no trimming forced).
+                        # Only trim if explicitly requested or in 'max'/'min' modes (not skip_merge).
+                        if dur >= 60 and duration_mode != 'free' and (trim_long_videos or not skip_merge):
+                            dur = 45.0  # Estimation average for trimmed videos
                         
                         eff_dur = dur / speed
                         video_pool.append(eff_dur)
@@ -213,7 +214,7 @@ class ShortsProcessor:
                 while idx < len(pool):
                     eff_dur = pool[idx]
                     
-                    # Check limit for Under 1 min mode
+                    # Check limit for Under 1 min mode only
                     if duration_mode == 'max':
                         if (current_duration + eff_dur) > 59.9:
                             idx += 1
@@ -401,7 +402,8 @@ class ShortsProcessor:
                     progress_callback(f"⏭️ Loại bỏ video >= 60s: {os.path.basename(f)}")
             else:
                 trim_long_videos = settings.get('trim_long_videos', False)
-                if dur >= 60 and (trim_long_videos or not skip_merge):
+                # In 'free' mode: never auto-trim long videos. Keep original duration.
+                if dur >= 60 and duration_mode != 'free' and (trim_long_videos or not skip_merge):
                     trim_dur = random.uniform(30.0, 55.0)
                     video_pool.append({"path": f, "dur": trim_dur, "trim_dur": trim_dur, "original_dur": dur})
                     if progress_callback:
@@ -445,6 +447,7 @@ class ShortsProcessor:
                         if (current_duration + eff_dur) > 59.9:
                             pool_idx += 1
                             continue
+                    # In 'free' mode: no upper cap, just fill until target_duration is hit
                     
                     # Add the video to batch
                     current_batch_files.append(f_item)
@@ -825,7 +828,7 @@ class ShortsProcessor:
                 
                 if has_video:
                     # Build video filter parts for the source video
-                    vf_parts = [f"setpts=PTS/{speed}"]
+                    vf_parts = [f"setpts=(PTS-STARTPTS)/{speed}"]
                     
                     if hflip:
                         if i > 0:
@@ -896,7 +899,7 @@ class ShortsProcessor:
                         "-i", f_path,
                         "-filter_complex", filter_complex,
                         "-map", "[v]", "-map", "[a]",
-                        "-c:v", "h264_nvenc", "-preset", "p5", "-b:v", "5M",
+                        "-c:v", "h264_nvenc", "-preset", "p5", "-b:v", "5M", "-bf", "0",
                         "-pix_fmt", "yuv420p", "-r", "30", "-video_track_timescale", "90000",
                         "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2", "-shortest",
                         temp_file
@@ -911,7 +914,7 @@ class ShortsProcessor:
                         "-i", f_path,
                         "-filter_complex", filter_complex,
                         "-map", "[v]", "-map", "[a]",
-                        "-c:v", "libx264", "-preset", "fast", "-crf", "18",
+                        "-c:v", "libx264", "-preset", "fast", "-crf", "18", "-bf", "0",
                         "-pix_fmt", "yuv420p", "-r", "30", "-video_track_timescale", "90000",
                         "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2", "-shortest",
                         temp_file
@@ -938,8 +941,9 @@ class ShortsProcessor:
                             "-i", f_path,
                             "-filter_complex", filter_complex,
                             "-map", "[v]", "-map", "[a]",
-                            "-c:v", "libx264", "-preset", "fast", "-crf", "18", "-pix_fmt", "yuv420p",
-                            "-c:a", "aac", "-b:a", "128k", "-shortest",
+                            "-c:v", "libx264", "-preset", "fast", "-crf", "18", "-bf", "0", "-pix_fmt", "yuv420p",
+                            "-r", "30", "-video_track_timescale", "90000",
+                            "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2", "-shortest",
                             temp_file
                         ])
                         result_fb = subprocess.run(cmd_fb, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -996,7 +1000,7 @@ class ShortsProcessor:
                     f.write(f"file '{safe_path}'\n")
             
             cmd = [ffmpeg_exe, "-y", "-f", "concat", "-safe", "0", "-i", concat_file]
-            cmd += ["-c", "copy", output_path]
+            cmd += ["-c", "copy", "-avoid_negative_ts", "make_zero", "-video_track_timescale", "90000", output_path]
             
             startupinfo = None
             if os.name == 'nt':
