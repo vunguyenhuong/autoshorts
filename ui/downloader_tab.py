@@ -326,7 +326,9 @@ class DownloaderThread(QThread):
                 list_cmd += ['--no-playlist', '--quiet', '--no-warnings', '-F', url]
 
                 try:
-                    fmt_result = subprocess.run(list_cmd, capture_output=True, text=True, timeout=60)
+                    _no_window = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
+                    fmt_result = subprocess.run(list_cmd, capture_output=True, text=True, timeout=60,
+                                               creationflags=_no_window)
                     fmt_output = fmt_result.stdout + fmt_result.stderr
                 except subprocess.TimeoutExpired:
                     self.progress.emit(f"{label} ⏭️ Timeout khi lấy format: {url}")
@@ -383,7 +385,9 @@ class DownloaderThread(QThread):
                     dl_cmd += ['--ffmpeg-location', ffmpeg_location]
 
                 try:
-                    dl_result = subprocess.run(dl_cmd, capture_output=True, text=True, timeout=300)
+                    _no_window = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
+                    dl_result = subprocess.run(dl_cmd, capture_output=True, text=True, timeout=300,
+                                              creationflags=_no_window)
                     # Don't set ok strictly here, we will check the file later
                 except subprocess.TimeoutExpired:
                     self.progress.emit(f"{label} ❌ Timeout khi tải: {url}")
@@ -769,6 +773,7 @@ class DownloaderTab(QWidget):
         self.download_done = 0    # How many have finished in this run
         self.already_downloaded = 0 # How many were skipped because already in history
         self.total_found = 0      # Total videos found in all channels
+        self._already_warned_urls = set()  # Guard: don't show history warning twice for same URL
         self.setup_ui()
 
     def setup_ui(self):
@@ -1077,6 +1082,9 @@ class DownloaderTab(QWidget):
             # Well, it's easier to just pass the callback to all. We only hide it for 'is_first' if it's the very first time.
             pass
 
+        # Connect URL text changes to history check for direct video links
+        widget.url_input.textChanged.connect(lambda: self._on_url_text_changed(widget))
+
         self.tasks_layout.addWidget(widget)
         self.task_widgets.append(widget)
         
@@ -1097,22 +1105,155 @@ class DownloaderTab(QWidget):
                 if hasattr(self.task_widgets[0], 'remove_btn'):
                     self.task_widgets[0].remove_btn.hide()
     
-    def clear_download_history(self):
-        """Clear download history with confirmation"""
+    def _on_url_text_changed(self, widget):
+        """Triggered when url_input text changes. Checks each line that looks like a direct video link."""
+        import re
+        video_patterns = [
+            r'watch\?v=', r'/shorts/', r'youtu\.be/',
+            r'facebook\.com/.+/videos/', r'tiktok\.com/.+/video/'
+        ]
+        text = widget.url_input.toPlainText()
+        current_lines = {l.strip() for l in text.splitlines() if l.strip()}
+
+        # Prune warned URLs that are no longer in the text (user deleted them)
+        self._already_warned_urls &= current_lines
+
+        for line in current_lines:
+            if line in self._already_warned_urls:
+                continue  # already prompted for this URL this session
+            if any(re.search(p, line) for p in video_patterns):
+                self._check_direct_video_in_history(line)
+
+    def _get_all_typed_urls(self):
+        """Collect all non-empty URLs from all task widgets."""
+        urls = []
+        for w in self.task_widgets:
+            text = w.url_input.toPlainText()
+            for line in text.splitlines():
+                line = line.strip()
+                if line:
+                    urls.append(line)
+        return urls
+
+    def _normalize_channel_key(self, url):
+        """Return the normalized channel key the same way DownloadHistory does."""
+        from core.downloader import ShortsDownloader
+        d = ShortsDownloader()
+        return d.history._normalize_url(url)
+
+    def _check_direct_video_in_history(self, url):
+        """
+        Called when user types / pastes a URL that looks like a direct video link.
+        If it already exists in history, ask whether to re-download.
+        Returns True if the user wants to proceed (re-download), False otherwise.
+        """
+        import re
+        video_patterns = [
+            r'watch\?v=', r'/shorts/', r'youtu\.be/',
+            r'facebook\.com/.+/videos/', r'tiktok\.com/.+/video/'
+        ]
+        if not any(re.search(p, url) for p in video_patterns):
+            return  # not a direct video link — nothing to do
+
+        from core.downloader import ShortsDownloader
+        downloader = ShortsDownloader()
+        # Check under all known channel keys for this video
+        video_key = downloader.history._normalize_url(url)
+        found_in = None
+        for channel_key, channel_data in downloader.history.history.items():
+            vids = channel_data.get('videos', []) if isinstance(channel_data, dict) else channel_data
+            if video_key in vids:
+                found_in = channel_key
+                break
+
+        if found_in is None:
+            self._already_warned_urls.add(url)  # Mark as checked (not in history)
+            return  # not in history — nothing to warn about
+
+        self._already_warned_urls.add(url)  # Mark so we don't prompt again
+
         reply = QMessageBox.question(
             self,
-            "Xóa lịch sử tải",
-            "Bạn có chắc muốn xóa toàn bộ lịch sử tải?\n\nThao tác này không thể hoàn tác.",
+            "Video đã được tải trước đó",
+            f"Link này đã có trong lịch sử tải:\n{url}\n\nBạn có muốn tải lại không?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No
         )
-        
-        if reply == QMessageBox.StandardButton.Yes:
-            from core.downloader import ShortsDownloader
-            downloader = ShortsDownloader()
-            downloader.history.clear_history()
-            QMessageBox.information(self, "Thành công", "Đã xóa lịch sử tải!")
-            self.log_message.emit("Đã xóa lịch sử tải")
+        if reply == QMessageBox.StandardButton.No:
+            # Remove the URL from the text area that triggered the check
+            for w in self.task_widgets:
+                text = w.url_input.toPlainText()
+                lines = [l for l in text.splitlines() if l.strip() != url]
+                if len(lines) != len(text.splitlines()):
+                    w.url_input.blockSignals(True)
+                    w.url_input.setPlainText('\n'.join(lines))
+                    w.url_input.blockSignals(False)
+                    break
+        # If Yes — leave the URL in place; the skip_downloaded checkbox will handle it,
+        # or the user can uncheck it manually.
+
+    def clear_download_history(self):
+        """Clear download history — selectively by channel if URLs are typed, else clear all."""
+        from core.downloader import ShortsDownloader
+        import re
+
+        typed_urls = self._get_all_typed_urls()
+
+        # Detect which of the typed URLs look like channel links (not direct videos)
+        video_patterns = [
+            r'watch\?v=', r'/shorts/', r'youtu\.be/',
+            r'facebook\.com/.+/videos/', r'tiktok\.com/.+/video/'
+        ]
+        channel_urls = []
+        for u in typed_urls:
+            if not any(re.search(p, u) for p in video_patterns):
+                # It's a channel link — strip /shorts or /videos suffix for matching
+                channel_urls.append(u)
+
+        downloader = ShortsDownloader()
+
+        if channel_urls:
+            # ── Selective delete: only remove history entries for typed channels ──
+            keys_to_delete = [downloader.history._normalize_url(u) for u in channel_urls]
+            existing_keys = list(downloader.history.history.keys())
+            matched = [k for k in existing_keys if k in keys_to_delete]
+
+            if not matched:
+                QMessageBox.information(
+                    self, "Không tìm thấy",
+                    "Không tìm thấy lịch sử nào cho các kênh bạn đã nhập.\n"
+                    "Kiểm tra lại URL hoặc để trống để xóa toàn bộ."
+                )
+                return
+
+            channel_list_str = '\n'.join(f'• {k}' for k in matched)
+            reply = QMessageBox.question(
+                self,
+                "Xóa lịch sử theo kênh",
+                f"Sẽ xóa lịch sử tải của {len(matched)} kênh sau:\n\n{channel_list_str}\n\n"
+                f"Thao tác này không thể hoàn tác. Tiếp tục?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                for k in matched:
+                    downloader.history.history.pop(k, None)
+                downloader.history.save_history()
+                QMessageBox.information(self, "Thành công", f"Đã xóa lịch sử của {len(matched)} kênh!")
+                self.log_message.emit(f"🗑️ Đã xóa lịch sử {len(matched)} kênh: {', '.join(matched)}")
+        else:
+            # ── Delete all ──
+            reply = QMessageBox.question(
+                self,
+                "Xóa toàn bộ lịch sử",
+                "Không có kênh nào được nhập.\n\nBạn có chắc muốn xóa TOÀN BỘ lịch sử tải?\n\nThao tác này không thể hoàn tác.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                downloader.history.clear_history()
+                QMessageBox.information(self, "Thành công", "Đã xóa toàn bộ lịch sử tải!")
+                self.log_message.emit("🗑️ Đã xóa toàn bộ lịch sử tải")
 
     def save_config(self):
         import json
