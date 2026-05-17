@@ -3,6 +3,7 @@ import sys
 import math
 import random
 import subprocess
+import time
 
 
 class ShortsProcessor:
@@ -421,6 +422,7 @@ class ShortsProcessor:
         if progress_callback:
             progress_callback(f"✅ Đã nhận {len(video_pool)} video hợp lệ sau khi lọc")
 
+        batches_to_render = []
         while video_pool:
             if check_cancel and check_cancel(): return
 
@@ -491,8 +493,20 @@ class ShortsProcessor:
                 video_pool.extend(current_batch_files)
                 continue
 
-            # 2. Render this batch
-            first_item = current_batch_files[0]
+            batches_to_render.append((batch_idx, current_batch_files))
+            batch_idx += 1
+            
+        # 2. Render all batches in parallel
+        import concurrent.futures
+        max_workers = settings.get('workers', settings.get('max_concurrent_videos', 4))
+        
+        if progress_callback and batches_to_render:
+            progress_callback(f"🚀 Chạy đa luồng: Xuất {max_workers} luồng merge cùng lúc (Tổng {len(batches_to_render)} video)")
+            
+        def render_single_batch(b_idx, batch_files):
+            if check_cancel and check_cancel(): return
+            
+            first_item = batch_files[0]
             first_path = first_item['path'] if isinstance(first_item, dict) else first_item
             base_name = os.path.splitext(os.path.basename(first_path))[0]
             
@@ -511,17 +525,20 @@ class ShortsProcessor:
                 output_path = os.path.join(output_folder, output_filename)
                 counter += 1
             
-            if progress_callback: progress_callback(f"Rendering {output_filename}...")
+            if progress_callback: progress_callback(f"Rendering Batch {b_idx}: {output_filename}...")
             
             try:
-                self.render_batch(current_batch_files, output_path, settings, progress_callback)
+                self.render_batch(batch_files, output_path, settings, progress_callback)
                 if progress_callback: progress_callback(f"Finished {output_filename}")
             except Exception as e:
                 import traceback
                 traceback.print_exc()
                 if progress_callback: progress_callback(f"Failed to render {output_filename}: {e}")
-            
-            batch_idx += 1
+
+        if batches_to_render:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = [executor.submit(render_single_batch, b_idx, b_files) for b_idx, b_files in batches_to_render]
+                concurrent.futures.wait(futures)
         
         # Move all unused videos
         video_pool.extend(discarded_videos)
@@ -587,46 +604,57 @@ class ShortsProcessor:
 
     def detect_gpu_encoder(self):
         """
-        Auto-detect available GPU encoder on the system
-        Supports: NVIDIA (NVENC), AMD (AMF), Intel (QSV), Apple (VideoToolbox)
-        Returns: tuple (encoder_name, preset_args, quality_args) or None if no GPU
+        Auto-detect available GPU encoder on the system.
+        Returns dict: {'encoder', 'preset_args', 'quality_args', 'hwaccel_args'} or None.
         """
+        if hasattr(self, '_gpu_cache') and self._gpu_cache != 'uncached':
+            return self._gpu_cache
         try:
             ffmpeg_exe = self.get_ffmpeg_binary()
             cmd = [ffmpeg_exe, '-hide_banner', '-encoders']
-            
             startupinfo = None
             if os.name == 'nt':
                 startupinfo = subprocess.STARTUPINFO()
                 startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-            
             result = subprocess.run(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                startupinfo=startupinfo,
-                encoding='utf-8',
-                errors='replace'
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, startupinfo=startupinfo,
+                encoding='utf-8', errors='replace'
             )
-            encoders_output = result.stdout.lower()
-            
-            # Check in priority order: NVIDIA > AMD > Intel > Apple
-            if 'h264_nvenc' in encoders_output:
-                return ('h264_nvenc', ['-preset', 'fast'], ['-cq', '18'])
-            
-            if 'h264_amf' in encoders_output:
-                return ('h264_amf', ['-quality', 'speed'], ['-rc', 'vbr_hq', '-qp_i', '18', '-qp_p', '18'])
-            
-            if 'h264_qsv' in encoders_output:
-                return ('h264_qsv', ['-preset', 'veryfast'], ['-global_quality', '18'])
-            
-            if 'h264_videotoolbox' in encoders_output:
-                return ('h264_videotoolbox', ['-realtime', '1', '-profile:v', 'high'], ['-b:v', '5M'])
-            
-            return None
-            
-        except Exception as e:
+            enc = result.stdout.lower()
+            if 'h264_nvenc' in enc:
+                # Pattern đơn giản hóa, dùng scale_cuda và overlay_cuda
+                self._gpu_cache = {
+                    'encoder':      'h264_nvenc',
+                    'preset_args':  ['-preset', 'p4', '-tune', 'hq'],
+                    'quality_args': ['-cq', '23', '-b:v', '0'],
+                    'hwaccel_args': ['-hwaccel', 'd3d11va', '-hwaccel_output_format', 'd3d11'],
+                    'decoder_arg':  [],
+                    'is_nvidia':    True
+                }
+            elif 'h264_amf' in enc:
+                self._gpu_cache = {
+                    'encoder':      'h264_amf',
+                    'preset_args':  ['-quality', 'speed'],
+                    'quality_args': ['-rc', 'vbr_hq', '-qp_i', '23', '-qp_p', '23'],
+                    'hwaccel_args': [],
+                    'decoder_arg':  [],
+                    'is_nvidia':    False
+                }
+            elif 'h264_qsv' in enc:
+                self._gpu_cache = {
+                    'encoder':      'h264_qsv',
+                    'preset_args':  ['-preset', 'fast'],
+                    'quality_args': ['-global_quality', '23'],
+                    'hwaccel_args': ['-hwaccel', 'qsv'],
+                    'decoder_arg':  [],
+                    'is_nvidia':    False
+                }
+            else:
+                self._gpu_cache = None
+            return self._gpu_cache
+        except Exception:
+            self._gpu_cache = None
             return None
 
     def check_gpu_availability(self):
@@ -747,286 +775,338 @@ class ShortsProcessor:
             pass
         return 1080, 1920 # Fallback
 
+    def render_batch_gpu_ffmpeg(self, file_paths, output_path, settings, progress_callback):
+        """
+        New GPU-accelerated rendering pipeline using FFmpeg directly in a single-pass command.
+        """
+        import random as py_random
+        
+        ffmpeg_exe = self.get_ffmpeg_binary()
+        temp_dir = os.path.dirname(output_path)
+        
+        gpu_info = self.detect_gpu_encoder()
+        
+        speed = float(settings.get('speed', 1.0))
+        sx = float(settings.get('scale_x', 1.0))
+        sy = float(settings.get('scale_y', 1.0))
+        if 'scale' in settings and sx == 1.0 and sy == 1.0:
+             val = float(settings['scale'])
+             if val != 1.0:
+                 sx, sy = val, val
+
+        off_x = int(settings.get('offset_x', 0))
+        off_y = int(settings.get('offset_y', 0))
+        overlay_color = settings.get('overlay_color', (0, 0, 0))
+        overlay_opacity = settings.get('overlay_opacity', 0)
+        hflip_enabled = settings.get('hflip', False)
+        random_color = settings.get('random_color', False)
+        film_grain = settings.get('film_grain', False)
+        
+        bg_hex = "0x{:02x}{:02x}{:02x}".format(*overlay_color) if overlay_opacity > 0 else "0xf0f0f0"
+        
+        CW, CH = 1080, 1920 # 1080x1920 as requested by the user
+        
+        startupinfo = None
+        if os.name == 'nt':
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = subprocess.SW_HIDE
+
+        try:
+            if progress_callback:
+                progress_callback("🎬 [GPU] Đang khởi tạo bộ trộn video đơn kỳ (Single-pass GPU Merger)...")
+            
+            # Check which files have audio
+            need_silent_audio = any(not self._has_audio_stream(f['path'] if isinstance(f, dict) else f) for f in file_paths)
+            
+            # Build the FFmpeg command
+            cmd = [ffmpeg_exe, "-y"]
+            cmd_cpu = [ffmpeg_exe, "-y"]
+            
+            # Add inputs to commands
+            for i, f_item in enumerate(file_paths):
+                f_path = f_item['path'] if isinstance(f_item, dict) else f_item
+                trim_dur = f_item.get('trim_dur', None) if isinstance(f_item, dict) else None
+                
+                # Add probesize and analyzeduration for robust decoding
+                for c in [cmd, cmd_cpu]:
+                    c.extend(["-probesize", "50M", "-analyzeduration", "100M"])
+                    if trim_dur:
+                        c.extend(["-t", str(trim_dur)])
+                    c.extend(["-i", f_path])
+            
+            # Add silent dummy audio source if needed
+            if need_silent_audio:
+                for c in [cmd, cmd_cpu]:
+                    c.extend(["-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100"])
+            
+            filter_complex_parts = []
+            
+            # Construct filters for each input video
+            for i, f_item in enumerate(file_paths):
+                f_path = f_item['path'] if isinstance(f_item, dict) else f_item
+                
+                # Determine audio source
+                has_audio = self._has_audio_stream(f_path)
+                if has_audio:
+                    audio_src = f"{i}:a"
+                else:
+                    audio_src = f"{len(file_paths)}:a" # Silent source at the end
+                
+                # Video filters
+                v_filters = []
+                
+                # 1. Crop and stretch/scale to 1080x1920 (Stretch Perfect Crop)
+                crop_scale = f"crop=iw/(1.22*{sx}):ih/(1.11*{sy}):(iw-ow)/2+{off_x}:(ih-oh)/2+{off_y},scale={CW}:{CH},setsar=1"
+                v_filters.append(crop_scale)
+                
+                # 2. PTS / Speed
+                if speed != 1.0:
+                    v_filters.append(f"setpts={1/speed}*PTS")
+                
+                # 3. Horizontal flip
+                if hflip_enabled and i > 0:
+                    if py_random.choice([True, False]):
+                        v_filters.append("hflip")
+                
+                # 4. Random color
+                if random_color:
+                    b = py_random.uniform(-0.03, 0.03)
+                    c = py_random.uniform(0.97, 1.03)
+                    v_filters.append(f"eq=brightness={b}:contrast={c}")
+                
+                # 5. Film grain
+                if film_grain:
+                    v_filters.append("noise=alls=4:allf=t+u")
+                
+                # 6. Color overlay
+                if overlay_opacity > 0:
+                    alpha = overlay_opacity / 100.0
+                    overlay_hex = "0x{:02x}{:02x}{:02x}".format(*overlay_color)
+                    v_filters.append(f"drawbox=x=0:y=0:w={CW}:h={CH}:color={overlay_hex}@{alpha}:t=fill")
+                
+                # 7. FPS and format normalization
+                v_filters.append("fps=30")
+                v_filters.append("format=yuv420p")
+                
+                v_filter_chain = ",".join(v_filters)
+                filter_complex_parts.append(f"[{i}:v]{v_filter_chain}[v{i}]")
+                
+                # Audio filters
+                a_filters = []
+                if speed != 1.0:
+                    a_filters.append(f"atempo={speed}")
+                a_filters.append("aformat=sample_rates=44100:channel_layouts=stereo")
+                
+                a_filter_chain = ",".join(a_filters)
+                filter_complex_parts.append(f"[{audio_src}]{a_filter_chain}[a{i}]")
+            
+            # Concatenate all inputs
+            concat_inputs = "".join(f"[v{i}][a{i}]" for i in range(len(file_paths)))
+            concat_filter = f"{concat_inputs}concat=n={len(file_paths)}:v=1:a=1[v][a]"
+            filter_complex_parts.append(concat_filter)
+            
+            filter_complex_str = ";".join(filter_complex_parts)
+            
+            # Complete the GPU command
+            cmd.extend([
+                "-filter_complex", filter_complex_str,
+                "-map", "[v]", "-map", "[a]",
+                "-c:v", "h264_nvenc", "-preset", "p6",
+                "-c:a", "aac", "-b:a", "192k",
+                output_path
+            ])
+            
+            # Complete the CPU fallback command
+            cmd_cpu.extend([
+                "-filter_complex", filter_complex_str,
+                "-map", "[v]", "-map", "[a]",
+                "-c:v", "libx264", "-preset", "fast", "-crf", "20",
+                "-c:a", "aac", "-b:a", "192k",
+                output_path
+            ])
+            
+            if progress_callback:
+                progress_callback("🚀 [GPU] Đang tiến hành gộp và scale video 1080x1920 (Stretch & Perfect Crop) bằng NVIDIA NVENC...")
+            
+            res = subprocess.run(cmd, capture_output=True, text=True, startupinfo=startupinfo)
+            
+            if res.returncode != 0:
+                if progress_callback:
+                    progress_callback("⚠️ GPU NVENC failed, falling back to CPU (libx264) direct render...")
+                res_cpu = subprocess.run(cmd_cpu, capture_output=True, text=True, startupinfo=startupinfo)
+                if res_cpu.returncode != 0:
+                    raise RuntimeError(f"Direct Concat failed on both GPU and CPU. CPU Error: {res_cpu.stderr}")
+            
+            if progress_callback:
+                progress_callback("✅ Gộp và xử lý video hoàn tất thành công!")
+            return True
+            
+        except Exception as e:
+            if progress_callback:
+                progress_callback(f"❌ GPU Render Error: {e}")
+            raise e
+
     def render_batch(self, file_paths, output_path, settings, progress_callback):
         """
-        Renders the batch using a two-pass approach:
-        1. Process each video individually (speed, scale, pad)
-        2. Concatenate all processed videos
-        This is more reliable than complex filter graphs.
+        Renders the batch. 
+        Uses GPU-accelerated FFmpeg pipeline if enabled, otherwise falls back to MoviePy.
         """
-        import subprocess
+        use_gpu_setting = settings.get('use_gpu', True)
+        
+        # If GPU is requested and we are on Windows, use the new high-performance pipeline
+        if use_gpu_setting and os.name == 'nt':
+            try:
+                if progress_callback:
+                    progress_callback(f"🚀 Using GPU FFmpeg Engine (High Performance)")
+                return self.render_batch_gpu_ffmpeg(file_paths, output_path, settings, progress_callback)
+            except Exception as e:
+                if progress_callback:
+                    progress_callback(f"⚠️ GPU Pipeline failed: {e}. Falling back to MoviePy...")
+        
+        # Original MoviePy Fallback
+        from moviepy import VideoFileClip, ColorClip, CompositeVideoClip, concatenate_videoclips, vfx
+        from proglog import ProgressBarLogger
         import tempfile
+
+        class GuiLogger(ProgressBarLogger):
+            def __init__(self, ui_callback):
+                super().__init__()
+                self.ui_callback = ui_callback
+                self.last_pct = -1
+
+            def bars_callback(self, bar, attr, value, old_value=None):
+                if bar == 'frame_index' and attr == 'index':
+                    total = self.bars[bar].get('total')
+                    if total:
+                        pct = int((value / total) * 100)
+                        if pct != self.last_pct and pct % 5 == 0:
+                            self.last_pct = pct
+                            if self.ui_callback:
+                                self.ui_callback(f"  ⏳ Encoding: {pct}%")
+
+            def callback(self, **kw):
+                # Optionally pass MoviePy's log messages to the UI
+                if 'message' in kw and self.ui_callback:
+                    self.ui_callback(kw['message'])
 
         speed = float(settings.get('speed', 1.0))
         sx = float(settings.get('scale_x', 1.0))
         sy = float(settings.get('scale_y', 1.0))
-        
         if 'scale' in settings and sx == 1.0 and sy == 1.0:
              val = float(settings['scale'])
              if val != 1.0:
-                 sx = val
-                 sy = val
+                 sx, sy = val, val
 
         off_x = int(settings.get('offset_x', 0))
         off_y = int(settings.get('offset_y', 0))
-        
         overlay_color = settings.get('overlay_color', (0, 0, 0))
         overlay_opacity = settings.get('overlay_opacity', 0)
-        
         hflip = settings.get('hflip', False)
-        random_color = settings.get('random_color', False)
-        film_grain = settings.get('film_grain', False)
-
-        ffmpeg_exe = self.get_ffmpeg_binary()
-        if progress_callback:
-            progress_callback(f"Using FFmpeg binary: {ffmpeg_exe}")
         
-        # Canvas dimensions
+        # Dimensions
         CW, CH = 1080, 1920
-        
-        # Create temp directory for intermediate files
-        temp_dir = tempfile.mkdtemp()
-        temp_files = [None] * len(file_paths)  # Pre-allocate to maintain order
-        
-        def process_single_video(i, f_item):
-            try:
+
+        if progress_callback:
+            progress_callback(f"🚀 Using MoviePy Engine (Python Native Video Editing)")
+
+        try:
+            processed_clips = []
+            
+            for i, f_item in enumerate(file_paths):
+                if progress_callback:
+                    progress_callback(f"Processing video {i+1}/{len(file_paths)}...")
+                    
                 if isinstance(f_item, dict):
                     f_path = f_item['path']
                     trim_dur = f_item.get('trim_dur', None)
                 else:
                     f_path = f_item
                     trim_dur = None
+                
+                clip = VideoFileClip(f_path)
+                if trim_dur:
+                    clip = clip.subclipped(0, trim_dur)
                     
-                # Probe dimensions, audio, and video
-                iw, ih = self._probe_dims(f_path)
-                has_audio = self._has_audio_stream(f_path)
-                has_video = self._has_video_stream(f_path)
-                
-                if not has_video and not has_audio:
-                    return i, False, "File has no video or audio stream"
-                
-                # Cover fill: scale the video so that it completely covers the canvas (1080x1920)
-                # This ensures no padding borders are visible by default
+                # Mirror FX
+                if hflip and i > 0:
+                    import random
+                    if random.choice([True, False]):
+                        clip = clip.with_effects([vfx.MirrorX()])
+                        
+                # Speed FX
+                if speed != 1.0:
+                    clip = clip.with_speed_scaled(speed)
+                    
+                # Scaling logic
+                iw, ih = clip.size
                 scale_x_ratio = CW / iw
                 scale_y_ratio = CH / ih
                 cover_scale = max(scale_x_ratio, scale_y_ratio)
+                
                 fit_width = int(iw * cover_scale)
                 fit_height = int(ih * cover_scale)
-                
-                # Apply user stretch (scale_x, scale_y) on top of the fit size
                 scaled_width = int(fit_width * sx)
                 scaled_height = int(fit_height * sy)
                 
-                # Calculate overlay position (center on canvas, with offset)
+                clip = clip.resized(new_size=(scaled_width, scaled_height))
+                
+                # Centering and Offset
                 overlay_x = (CW - scaled_width) // 2 + off_x
                 overlay_y = (CH - scaled_height) // 2 + off_y
                 
-                # Background color hex
-                bg_hex = f"0x{overlay_color[0]:02x}{overlay_color[1]:02x}{overlay_color[2]:02x}" if overlay_opacity > 0 else "0xf0f0f0"
+                # Background
+                bg_color = overlay_color if overlay_opacity > 0 else (240, 240, 240)
+                bg_clip = ColorClip(size=(CW, CH), color=bg_color, duration=clip.duration)
                 
-                filter_parts = []
-                
-                if has_video:
-                    # Build video filter parts for the source video
-                    vf_parts = [f"setpts=(PTS-STARTPTS)/{speed}"]
-                    
-                    if hflip:
-                        if i > 0:
-                            import random
-                            if random.choice([True, False]):
-                                vf_parts.append("hflip")
-                        
-                    if random_color:
-                        import random
-                        br = round(random.uniform(-0.03, 0.03), 3)
-                        con = round(random.uniform(0.95, 1.05), 3)
-                        sat = round(random.uniform(0.95, 1.10), 3)
-                        vf_parts.append(f"eq=brightness={br}:contrast={con}:saturation={sat}")
-                    
-                    if film_grain:
-                        vf_parts.append("noise=alls=1:allf=t+u")
-                    
-                    # Scale video to fit size (like autocut: scale → place on background)
-                    vf_parts.append(f"scale={scaled_width}:{scaled_height}:flags=lanczos")
-                    
-                    vf_chain = ",".join(vf_parts)
-                    
-                    # Build filter_complex: create background → overlay scaled video on it
-                    filter_parts.append(f"[0:v]{vf_chain}[scaled]")
-                    filter_parts.append(f"color=c={bg_hex}:s={CW}x{CH}:r=30[bg]")
-                    filter_parts.append(f"[bg][scaled]overlay={overlay_x}:{overlay_y}:shortest=1[base]")
-                else:
-                    # No video stream (e.g. m4a file), just create a solid background
-                    filter_parts.append(f"color=c={bg_hex}:s={CW}x{CH}:r=30[base]")
+                # Composite
+                final_clip = CompositeVideoClip([bg_clip, clip.with_position((overlay_x, overlay_y))])
+                processed_clips.append(final_clip)
 
-                # Color overlay on top if opacity > 0
-                if overlay_opacity > 0:
-                    alpha = overlay_opacity / 100.0
-                    overlay_hex_color = f"0x{overlay_color[0]:02x}{overlay_color[1]:02x}{overlay_color[2]:02x}"
-                    filter_parts.append(f"[base]drawbox=x=0:y=0:w={CW}:h={CH}:color={overlay_hex_color}@{alpha}:t=fill,fps=30,settb=1/90000[v]")
-                else:
-                    filter_parts.append(f"[base]fps=30,settb=1/90000[v]")
-                
-                # Audio speed & enforce uniform target sample rate + stereo
-                if speed > 2.0:
-                    af = f"atempo=2.0,atempo={speed/2.0},aformat=sample_rates=44100:channel_layouts=stereo"
-                else:
-                    af = f"atempo={speed},aformat=sample_rates=44100:channel_layouts=stereo"
-                
-                # Add audio filter
-                if has_audio:
-                    filter_parts.append(f"[0:a]{af}[a]")
-                else:
-                    filter_parts.append(f"anullsrc=channel_layout=stereo:sample_rate=44100[a]")
-                
-                filter_complex = ";".join(filter_parts)
-                
-                temp_file = os.path.join(temp_dir, f"temp_{i:03d}.mp4")
-                
-                # Check for NVIDIA GPU
-                gpu_info = self.detect_gpu_encoder()
-                use_nvenc = gpu_info and gpu_info[0] == 'h264_nvenc'
-                
-                # Build command — proven CUDA pattern:
-                if use_nvenc:
-                    cmd = [
-                        ffmpeg_exe, "-y",
-                        "-hwaccel", "cuda"
-                    ]
-                    if trim_dur:
-                        cmd.extend(["-t", f"{trim_dur:.3f}"])
-                    cmd.extend([
-                        "-i", f_path,
-                        "-filter_complex", filter_complex,
-                        "-map", "[v]", "-map", "[a]",
-                        "-c:v", "h264_nvenc", "-preset", "p5", "-b:v", "5M", "-bf", "0",
-                        "-pix_fmt", "yuv420p", "-r", "30", "-video_track_timescale", "90000",
-                        "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2", "-shortest",
-                        temp_file
-                    ])
-                else:
-                    cmd = [
-                        ffmpeg_exe, "-y"
-                    ]
-                    if trim_dur:
-                        cmd.extend(["-t", f"{trim_dur:.3f}"])
-                    cmd.extend([
-                        "-i", f_path,
-                        "-filter_complex", filter_complex,
-                        "-map", "[v]", "-map", "[a]",
-                        "-c:v", "libx264", "-preset", "fast", "-crf", "18", "-bf", "0",
-                        "-pix_fmt", "yuv420p", "-r", "30", "-video_track_timescale", "90000",
-                        "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2", "-shortest",
-                        temp_file
-                    ])
-                
-                # Execute
-                startupinfo = None
-                if os.name == 'nt':
-                    startupinfo = subprocess.STARTUPINFO()
-                    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-                
-                result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, 
-                                      startupinfo=startupinfo, encoding='utf-8', errors='replace')
-                
-                if result.returncode != 0:
-                    if use_nvenc:
-                        # Fallback to CPU if NVENC fails (concurrent stream limit)
-                        cmd_fb = [
-                            ffmpeg_exe, "-y"
-                        ]
-                        if trim_dur:
-                            cmd_fb.extend(["-t", f"{trim_dur:.3f}"])
-                        cmd_fb.extend([
-                            "-i", f_path,
-                            "-filter_complex", filter_complex,
-                            "-map", "[v]", "-map", "[a]",
-                            "-c:v", "libx264", "-preset", "fast", "-crf", "18", "-bf", "0", "-pix_fmt", "yuv420p",
-                            "-r", "30", "-video_track_timescale", "90000",
-                            "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2", "-shortest",
-                            temp_file
-                        ])
-                        result_fb = subprocess.run(cmd_fb, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                               startupinfo=startupinfo, encoding='utf-8', errors='replace')
-                        if result_fb.returncode != 0:
-                            return i, False, f"GPU Error:\n{result.stderr}\n\nCPU Fallback Error:\n{result_fb.stderr}"
-                    else:
-                        return i, False, result.stderr
-                        
-                return i, True, temp_file
-            except Exception as e:
-                return i, False, str(e)
-        
-        try:
-            # PASS 1: Process each video individually (Concurrently)
-            import concurrent.futures
-            
-            # Use workers from settings (default 4)
-            max_parallel = settings.get('workers', 4)
-            
             if progress_callback:
-                progress_callback(f"Starting {len(file_paths)} jobs on pool of {max_parallel} workers")
-            
-            with concurrent.futures.ThreadPoolExecutor(max_workers=max_parallel) as executor:
-                futures = []
-                for i, f_path in enumerate(file_paths):
-                    if progress_callback:
-                        progress_callback(f"Queueing video {i+1}/{len(file_paths)}...")
-                    futures.append(executor.submit(process_single_video, i, f_path))
+                progress_callback("Merging all clips into final timeline...")
                 
-                completed = 0
-                for future in concurrent.futures.as_completed(futures):
-                    i, success, res = future.result()
-                    completed += 1
-                    
-                    if not success:
-                        if progress_callback:
-                            progress_callback(f"[Error] Failed to process video {i+1}")
-                            progress_callback(res[-500:] if len(res) > 500 else res)
-                        raise Exception(f"FFmpeg failed on video {i+1}")
-                    
-                    temp_files[i] = res
-                    if progress_callback:
-                        progress_callback(f"✓ Video {completed}/{len(file_paths)} encoded successfully.")
+            final_video = concatenate_videoclips(processed_clips, method="compose")
             
-            # PASS 2: Concatenate all temp files
-            if progress_callback:
-                progress_callback("Concatenating videos...")
+            # Export Setting
+            use_gpu_setting = settings.get('use_gpu', True)
             
-            concat_file = os.path.join(temp_dir, "concat_list.txt")
-            with open(concat_file, "w", encoding="utf-8") as f:
-                for temp_file in temp_files:
-                    safe_path = temp_file.replace("\\", "/")
-                    f.write(f"file '{safe_path}'\n")
+            moviepy_logger = GuiLogger(progress_callback)
             
-            cmd = [ffmpeg_exe, "-y", "-f", "concat", "-safe", "0", "-i", concat_file]
-            cmd += ["-c", "copy", "-avoid_negative_ts", "make_zero", "-video_track_timescale", "90000", output_path]
-            
-            startupinfo = None
-            if os.name == 'nt':
-                startupinfo = subprocess.STARTUPINFO()
-                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-            
-            result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                  startupinfo=startupinfo, encoding='utf-8', errors='replace')
-            
-            if result.returncode != 0:
+            if use_gpu_setting:
                 if progress_callback:
-                    progress_callback("[Error] Failed to merge videos")
-                    progress_callback(result.stderr[-500:] if len(result.stderr) > 500 else result.stderr)
-                raise Exception("FFmpeg merge failed")
-            
+                    progress_callback("  🎮 Exporting using MoviePy NVENC Encoder...")
+                ffmpeg_params = ['-cq', '23', '-b:v', '0']
+                final_video.write_videofile(
+                    output_path, 
+                    codec="h264_nvenc", 
+                    fps=30, 
+                    preset="p1", 
+                    ffmpeg_params=ffmpeg_params, 
+                    threads=4, 
+                    logger=moviepy_logger
+                )
+            else:
+                if progress_callback:
+                    progress_callback("  🖥️ Exporting using MoviePy CPU Encoder...")
+                final_video.write_videofile(
+                    output_path, 
+                    codec="libx264", 
+                    fps=30, 
+                    preset="fast", 
+                    threads=4, 
+                    logger=moviepy_logger
+                )
+                
+            # Memory Cleanup
+            final_video.close()
+            for c in processed_clips:
+                c.close()
+                
             if progress_callback:
                 progress_callback("✓ Rendering complete!")
                 
         except Exception as e:
             if progress_callback:
-                progress_callback(f"Render Error: {e}")
+                progress_callback(f"[MoviePy Error] Render failed: {str(e)}")
             raise e
-        finally:
-            # Cleanup temp files
-            import shutil
-            try:
-                shutil.rmtree(temp_dir)
-            except:
-                pass

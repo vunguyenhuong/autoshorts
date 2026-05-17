@@ -19,9 +19,9 @@ from datetime import datetime
 from PIL import Image
 
 # Import from core module
-from core.video_editor import (VideoProcessThread, SkipRangeWidget, 
-                               detect_gpu_encoder, FFMPEG_EXE, FFPROBE_EXE,
-                               run_ffmpeg_silent, EXE_DIR)
+from core.autocut_processor import (VideoProcessThread, SkipRangeWidget, 
+                                   detect_gpu_encoder, FFMPEG_EXE, FFPROBE_EXE,
+                                   run_ffmpeg_silent, EXE_DIR)
 
 class PreviewPopup(QWidget):
     """Popup window để hiển thị preview ở kích thước lớn hơn"""
@@ -1178,15 +1178,18 @@ class AutoCutTab(QWidget):
         """Phát hiện và hiển thị thông tin GPU"""
         gpu_info = detect_gpu_encoder()
         if gpu_info:
-            encoder_name, _, _ = gpu_info
+            # gpu_info là dict: {'encoder': ..., 'preset_args': ..., 'hwaccel_args': ..., ...}
+            encoder_name = gpu_info['encoder']
             gpu_names = {
-                'h264_nvenc': '✅ NVIDIA NVENC',
+                'h264_nvenc': '✅ NVIDIA NVENC (CUDA)',
                 'h264_amf': '✅ AMD AMF',
                 'h264_qsv': '✅ Intel QSV',
                 'h264_videotoolbox': '✅ Apple VideoToolbox'
             }
             display_name = gpu_names.get(encoder_name, f'✅ {encoder_name}')
-            self.gpu_info_label.setText(f"Đã phát hiện: {display_name}")
+            hw = ' '.join(gpu_info.get('hwaccel_args', []))
+            hw_label = f" | hw: {hw}" if hw else ""
+            self.gpu_info_label.setText(f"Đã phát hiện: {display_name}{hw_label}")
             self.gpu_info_label.setStyleSheet("color: #27ae60; font-size: 8pt; font-weight: 500; margin-left: 20px;")
         else:
             self.gpu_info_label.setText("⚠️ Không tìm thấy GPU, sẽ sử dụng CPU (libx264)")
@@ -1498,6 +1501,7 @@ class AutoCutTab(QWidget):
         progress_layout.setContentsMargins(0, 0, 0, 0)
 
         self.progress_label = QLabel("Sẵn sàng")
+        self.progress_label.setWordWrap(True)
         self.progress_label.setStyleSheet("color: #7f8c8d; font-size: 9pt;")
         progress_layout.addWidget(self.progress_label)
 
@@ -2038,6 +2042,9 @@ class AutoCutTab(QWidget):
         self.log_message.emit(message)
     
     def start_processing(self):
+        import time
+        self.start_time = time.time()
+        
         if not hasattr(self, 'video_item_widgets') or not self.video_item_widgets:
             self.log("❌ Vui lòng chọn " + ("video" if self.processing_mode == 'single' else "thư mục") + " đầu vào!")
             self.status_display.setText("🔴 Thiếu đầu vào")
@@ -2302,7 +2309,12 @@ class AutoCutTab(QWidget):
         self.thread.start()
     
     def update_progress(self, message):
-        self.progress_label.setText(f"{message}")
+        if message.startswith("🐛 CMD:"):
+            self.progress_label.setText("⚙️ Đang chạy lệnh FFmpeg xử lý video...")
+        else:
+            # Truncate if any other status message is unusually long to protect the layout
+            display_msg = message if len(message) <= 120 else message[:117] + "..."
+            self.progress_label.setText(display_msg)
         self.log(message)
     
     def stop_processing(self):
@@ -2322,6 +2334,14 @@ class AutoCutTab(QWidget):
                 self.status_display.setText("🔴 Đã dừng")
                 self.status_display.setStyleSheet(self.status_display.styleSheet().replace("#27ae60", "#e74c3c").replace("#e8f6f3", "#fadbd8").replace("#f39c12", "#e74c3c"))
                 self.progress_label.setText("Đã dừng bởi người dùng")
+                
+                import time
+                if hasattr(self, 'start_time'):
+                    elapsed = time.time() - self.start_time
+                    mins = int(elapsed // 60)
+                    secs = int(elapsed % 60)
+                    self.log(f"⏱️ Tổng thời gian xử lý: {mins} phút {secs} giây.")
+                    
                 self.log("⚠️ Đã dừng quá trình xử lý")
 
     def processing_finished(self, success, message):
@@ -2353,3 +2373,10 @@ class AutoCutTab(QWidget):
         self.status_display.setStyleSheet(self.status_display.styleSheet().replace("#f39c12", "#27ae60").replace("#fef9e7", "#e8f6f3").replace("#e74c3c", "#27ae60"))
         self.progress_label.setText("Đã xử lý xong tất cả các video!")
         self.log(f"🎉 Hoàn tất quá trình xử lý hàng loạt ({self.total_queue_size} file)!")
+        
+        import time
+        if hasattr(self, 'start_time'):
+            elapsed = time.time() - self.start_time
+            mins = int(elapsed // 60)
+            secs = int(elapsed % 60)
+            self.log(f"⏱️ Tổng thời gian xử lý: {mins} phút {secs} giây.")

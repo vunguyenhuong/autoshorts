@@ -59,12 +59,25 @@ def run_ffmpeg_silent(cmd):
         return result
 
 
+# Cache for GPU detection result
+_gpu_encoder_cache = None
+
 def detect_gpu_encoder():
     """
     Auto-detect available GPU encoder on the system
     Supports: NVIDIA (NVENC), AMD (AMF), Intel (QSV), Apple (VideoToolbox)
-    Returns: tuple (encoder_name, preset_args, quality_args) or None if no GPU
+    Returns: dict with keys:
+        'encoder'     : encoder name (e.g. 'h264_nvenc')
+        'preset_args' : list of preset args
+        'quality_args': list of quality args
+        'hwaccel_args': list of hwaccel decode args (prepended before -i)
+        'is_nvidia'   : bool - True if NVIDIA CUDA is available
+    Or None if no GPU found.
     """
+    global _gpu_encoder_cache
+    if _gpu_encoder_cache is not None:
+        return _gpu_encoder_cache
+    
     try:
         cmd = [FFMPEG_EXE, '-hide_banner', '-encoders']
         result = run_ffmpeg_silent(cmd)
@@ -72,23 +85,52 @@ def detect_gpu_encoder():
         
         # Check in priority order: NVIDIA > AMD > Intel > Apple
         if 'h264_nvenc' in encoders_output:
-            return ('h264_nvenc', ['-preset', 'p4'], ['-cq', '23'])
+            # Dùng CPU decode để tránh lỗi format mismatch với scale/overlay filter trong filter_complex.
+            # Thêm '-rc', 'vbr' để đảm bảo '-cq' được hỗ trợ tránh lỗi Invalid argument.
+            _gpu_encoder_cache = {
+                'encoder':      'h264_nvenc',
+                'preset_args':  ['-preset', 'p4', '-tune', 'hq'],
+                'quality_args': ['-rc', 'vbr', '-cq', '23', '-b:v', '0'],
+                'hwaccel_args': [],
+                'decoder_arg':  [],
+                'is_nvidia':    True,
+            }
+        elif 'h264_amf' in encoders_output:
+            _gpu_encoder_cache = {
+                'encoder':      'h264_amf',
+                'preset_args':  ['-quality', 'speed'],
+                'quality_args': ['-rc', 'vbr_hq', '-qp_i', '23', '-qp_p', '23'],
+                'hwaccel_args': [],
+                'decoder_arg':  [],
+                'is_nvidia':    False,
+            }
+        elif 'h264_qsv' in encoders_output:
+            # Dùng CPU decode để tránh lỗi format mismatch
+            _gpu_encoder_cache = {
+                'encoder':      'h264_qsv',
+                'preset_args':  ['-preset', 'fast'],
+                'quality_args': ['-global_quality', '23'],
+                'hwaccel_args': [],
+                'decoder_arg':  [],
+                'is_nvidia':    False,
+            }
+        elif 'h264_videotoolbox' in encoders_output:
+            _gpu_encoder_cache = {
+                'encoder':      'h264_videotoolbox',
+                'preset_args':  ['-profile:v', 'high'],
+                'quality_args': ['-b:v', '5M'],
+                'hwaccel_args': [],
+                'decoder_arg':  [],
+                'is_nvidia':    False,
+            }
+        else:
+            _gpu_encoder_cache = None
         
-        if 'h264_amf' in encoders_output:
-            return ('h264_amf', ['-quality', 'balanced'], ['-rc', 'vbr_hq', '-qp_i', '23', '-qp_p', '23'])
-        
-        if 'h264_qsv' in encoders_output:
-            return ('h264_qsv', ['-preset', 'medium'], ['-global_quality', '23'])
-        
-        if 'h264_videotoolbox' in encoders_output:
-            return ('h264_videotoolbox', ['-profile:v', 'high'], ['-b:v', '5M'])
-        
-        return None
+        return _gpu_encoder_cache
         
     except Exception as e:
         print(f"⚠️ Error detecting GPU: {e}")
         return None
-
 
 class SkipRangeWidget(QWidget):
     """Widget for a single skip range"""
@@ -215,6 +257,7 @@ class VideoProcessThread(QThread):
         self.subtitle_font_size = kwargs.get('subtitle_font_size', 40)
         self.subtitle_y_position = kwargs.get('subtitle_y_position', 1400)
         
+        self._gpu_info = None # Cache for GPU detection
         self.is_cancelled = False  # Flag for cancellation
         
     def stop(self):
@@ -667,17 +710,29 @@ class VideoProcessThread(QThread):
     
     def process_final_video(self, input_clip, title_image, output_file, video_width, video_height):
         """Process final video with overlay and speed"""
+        hwaccel_args = []
+        decoder_arg  = []
+
         if self.use_gpu:
-            gpu_info = detect_gpu_encoder()
-            if gpu_info:
-                encoder_name, preset_args, quality_args = gpu_info
-                video_codec = ['-c:v', encoder_name] + preset_args + quality_args
-                self.progress.emit(f"🎮 Sử dụng GPU encoder: {encoder_name}")
+            if self._gpu_info is None:
+                self._gpu_info = detect_gpu_encoder()
+
+            if self._gpu_info:
+                gpu          = self._gpu_info
+                encoder_name = gpu['encoder']
+                preset_args  = gpu['preset_args']
+                quality_args = gpu['quality_args']
+                hwaccel_args = gpu.get('hwaccel_args', [])
+                decoder_arg  = gpu.get('decoder_arg', [])
+                video_codec  = ['-c:v', encoder_name] + preset_args + quality_args
+
+                hw_desc = ' '.join(hwaccel_args + decoder_arg) or 'CPU decode'
+                self.progress.emit(f"🎮 GPU: {hw_desc} → encode={encoder_name} preset={preset_args[1] if len(preset_args)>1 else '-'}")
             else:
-                video_codec = ['-c:v', 'libx264', '-preset', 'medium', '-crf', '23']
-                self.progress.emit("⚠️ Không tìm thấy GPU encoder, sử dụng CPU (libx264)")
+                video_codec = ['-c:v', 'libx264', '-preset', 'fast', '-crf', '20']
+                self.progress.emit("⚠️ Không tìm thấy GPU encoder, dùng CPU (libx264)")
         else:
-            video_codec = ['-c:v', 'libx264', '-preset', 'medium', '-crf', '23']
+            video_codec = ['-c:v', 'libx264', '-preset', 'fast', '-crf', '20']
         
         bg_hex = f"0x{self.bg_color[0]:02x}{self.bg_color[1]:02x}{self.bg_color[2]:02x}"
         
@@ -852,47 +907,69 @@ class VideoProcessThread(QThread):
                     
             audio_map = ['-map', '0:a?']
 
-        cmd = [
-            FFMPEG_EXE, '-y',
-            '-i', input_clip,
-            '-i', title_image,
-            '-filter_complex', filter_complex,
-            '-map', '[out]'
-        ]
-
-        cmd.extend(audio_map)
-        cmd.extend(video_codec)
-        
-        output_args = [
-            '-c:a', 'aac', '-b:a', '192k',
-            '-movflags', '+faststart',
-            '-pix_fmt', 'yuv420p'
-        ]
-        if is_audio_only:
-            output_args.append('-shortest')
-        output_args.append(output_file)
-        
-        cmd.extend(output_args)
+        def _build_cmd(use_hwaccel):
+            """Build FFmpeg command with correct arg order:
+            ffmpeg -y [hwaccel_args] [decoder_arg] -i video -i image ...
+            """
+            c = [FFMPEG_EXE, '-y']
+            if use_hwaccel and hwaccel_args:
+                c.extend(hwaccel_args)   # -vsync 0 -hwaccel cuvid
+                c.extend(decoder_arg)    # -c:v h264_cuvid  (TRƯỚC -i)
+            c.extend(['-i', input_clip,
+                       '-i', title_image,
+                       '-filter_complex', filter_complex,
+                       '-map', '[out]'])
+            c.extend(audio_map)
+            c.extend(video_codec)
+            c.extend(['-c:a', 'aac', '-b:a', '192k',
+                      '-movflags', '+faststart', '-pix_fmt', 'yuv420p'])
+            if is_audio_only:
+                c.append('-shortest')
+            c.append(output_file)
+            return c
 
         self.progress.emit(f"🔄 Đang xử lý: {output_file}")
-        
-        # Log FFmpeg command for debugging (only if subtitle is enabled)
-        if self.subtitle_file:
-            cmd_str = ' '.join([f'"{arg}"' if ' ' in str(arg) else str(arg) for arg in cmd])
-            self.progress.emit(f"🐛 FFmpeg command: {cmd_str[:200]}...")  # First 200 chars
-        
+
+        # --- Lần 1: GPU encode (CPU decode + GPU NVENC/AMF/QSV/VT encode) ---
+        cmd = _build_cmd(use_hwaccel=False)
+        cmd_preview = ' '.join(str(a) for a in cmd[:16])
+        self.progress.emit(f"🐛 CMD: {cmd_preview} ...")
         result = run_ffmpeg_silent(cmd)
-        
-        # Check if FFmpeg succeeded
+
+        # --- Nếu fail và đang dùng GPU encode, tự fallback về full CPU decode + CPU encode (libx264) ---
+        is_gpu_codec = self.use_gpu and self._gpu_info is not None
+        if result.returncode != 0 and is_gpu_codec:
+            stderr_short = '\n'.join(result.stderr.strip().splitlines()[-6:])
+            self.progress.emit(f"⚠️ GPU encode lỗi (code {result.returncode}), fallback CPU encode (libx264)...")
+            self.progress.emit(f"   Lỗi: {stderr_short}")
+
+            # Fallback: CPU decode + CPU encode (libx264)
+            cpu_video_codec = ['-c:v', 'libx264', '-preset', 'fast', '-crf', '20']
+            cmd_fallback = [FFMPEG_EXE, '-y',
+                            '-i', input_clip, '-i', title_image,
+                            '-filter_complex', filter_complex, '-map', '[out]']
+            cmd_fallback.extend(audio_map)
+            cmd_fallback.extend(cpu_video_codec)
+            cmd_fallback.extend(['-c:a', 'aac', '-b:a', '192k',
+                                  '-movflags', '+faststart', '-pix_fmt', 'yuv420p'])
+            if is_audio_only:
+                cmd_fallback.append('-shortest')
+            cmd_fallback.append(output_file)
+
+            self.progress.emit(f"🔄 Fallback CMD (CPU decode + CPU encode)...")
+            result = run_ffmpeg_silent(cmd_fallback)
+
+        # --- Kiểm tra kết quả cuối ---
         if result.returncode != 0:
-            error_msg = f"FFmpeg failed with code {result.returncode}"
-            if result.stderr:
-                # Get last 1000 chars of stderr (usually contains the actual error)
-                stderr_lines = result.stderr.strip().split('\n')
-                relevant_error = '\n'.join(stderr_lines[-10:])  # Last 10 lines
-                error_msg += f"\n{relevant_error}"
-            self.progress.emit(f"❌ {error_msg}")
-            raise RuntimeError(error_msg)
+            stderr_lines = result.stderr.strip().splitlines() if result.stderr else []
+            # Hiển thị toàn bộ stderr để debug
+            self.progress.emit(f"❌ FFmpeg thất bại (code {result.returncode}):")
+            for line in stderr_lines[-20:]:
+                self.progress.emit(f"   {line}")
+            raise RuntimeError(
+                f"FFmpeg failed code={result.returncode}\n"
+                + '\n'.join(stderr_lines[-15:])
+            )
         
         # Verify output file was created
         if not os.path.exists(output_file):

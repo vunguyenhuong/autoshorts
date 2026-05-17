@@ -290,6 +290,12 @@ class TerminalLog(QTextEdit):
         super().__init__(parent)
         self.setReadOnly(True)
         self.setFont(QFont("Consolas", 11))
+        
+        # Enable line wrapping and force wrapping of extremely long paths/commands
+        self.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
+        from PyQt6.QtGui import QTextOption
+        self.setWordWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
+        
         self._dark = True
         self.setStyleSheet(self._DARK_QSS)
 

@@ -2,7 +2,7 @@ import os
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLineEdit,
     QLabel, QFileDialog, QGroupBox, QMessageBox, QCheckBox,
-    QTextEdit, QScrollArea, QSizePolicy, QComboBox, QDateEdit, QSpinBox, QPushButton
+    QTextEdit, QScrollArea, QSizePolicy, QComboBox, QDateEdit, QSpinBox, QPushButton, QRadioButton, QButtonGroup
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QDate
 from core.downloader import ShortsDownloader
@@ -73,7 +73,8 @@ class FetcherThread(QThread):
                         'url': adjusted_url, 
                         'original_url': url.strip(),
                         'limit': t['limit'], 
-                        'folder': t['folder'], 
+                        'folder': t['folder'],
+                        'folder_mode': t.get('folder_mode', 'flat'),
                         'task_id': t.get('task_id', 0),
                         'content_type': content_type
                     })
@@ -137,6 +138,7 @@ class FetcherThread(QThread):
                         v['channel_url'] = url
                         
                     v['folder'] = folder
+                    v['folder_mode'] = task.get('folder_mode', 'flat')
                     v['task_id'] = task['task_id']
                     v['limit'] = task['limit']
                     v['content_type'] = content_type
@@ -209,7 +211,64 @@ class DownloaderThread(QThread):
             tid = video.get('task_id', 0)
             label = f"[Task {tid + 1}]"
             
-            vid_folder = video.get('folder', os.path.join(os.path.expanduser("~"), "Documents", "AutoShorts", "downloads"))
+            base_folder = video.get('folder', os.path.join(os.path.expanduser("~"), "Documents", "AutoShorts", "downloads"))
+            folder_mode = video.get('folder_mode', 'flat')
+            
+            # Extract @username from channel URL (shared across modes)
+            channel_username = None
+            if channel_url:
+                import re as _re
+                m = _re.search(r'(@[\w.\-]+)', channel_url)
+                if m:
+                    channel_username = m.group(1)
+                else:
+                    seg = channel_url.rstrip('/').split('/')[-1]
+                    if seg.lower() not in ('shorts', 'videos', 'reels'):
+                        channel_username = seg
+                    else:
+                        channel_username = channel_url.rstrip('/').split('/')[-2]
+
+            # Resolve actual save folder based on folder_mode
+            if folder_mode == 'by_channel' and channel_username:
+                vid_folder = os.path.join(base_folder, channel_username)
+            elif folder_mode == 'map_existing' and channel_username:
+                # Find an existing subfolder in base_folder that matches the channel username
+                # Strips leading '@' for matching since folder may be named without '@'
+                uname_bare = channel_username.lstrip('@')
+                matched_dir = None
+                if os.path.isdir(base_folder):
+                    for entry in os.listdir(base_folder):
+                        entry_path = os.path.join(base_folder, entry)
+                        if os.path.isdir(entry_path):
+                            if entry.lstrip('@').lower() == uname_bare.lower():
+                                matched_dir = entry_path
+                                break
+                if matched_dir:
+                    vid_folder = matched_dir
+                else:
+                    # Fallback: use base folder
+                    vid_folder = base_folder
+                    self.progress.emit(f"{label} ⚠️ Không tìm thấy folder trùng '{channel_username}' trong {base_folder} — lưu vào thư mục gốc.")
+            elif folder_mode == 'map_username' and channel_username:
+                # Similar to map_existing: look for existing subfolder matching @username.
+                # Difference from map_existing: if not found, do NOT create; skip instead (with warning).
+                uname_bare = channel_username.lstrip('@')
+                matched_dir = None
+                if os.path.isdir(base_folder):
+                    for entry in os.listdir(base_folder):
+                        entry_path = os.path.join(base_folder, entry)
+                        if os.path.isdir(entry_path):
+                            if entry.lstrip('@').lower() == uname_bare.lower():
+                                matched_dir = entry_path
+                                break
+                if matched_dir:
+                    vid_folder = matched_dir
+                else:
+                    self.progress.emit(f"{label} ⏭️ Bỏ qua (không có folder nào khớp '{channel_username}' trong {base_folder}): {url}")
+                    return 'skipped', video
+            else:
+                vid_folder = base_folder
+            
             if not os.path.exists(vid_folder):
                 os.makedirs(vid_folder, exist_ok=True)
 
@@ -239,12 +298,14 @@ class DownloaderThread(QThread):
                 with yt_dlp.YoutubeDL(info_opts) as ydl:
                     info = ydl.extract_info(url, download=False)
             except Exception as e:
-                self.progress.emit(f"{label} ❌ Không lấy được thông tin: {url} — {e}")
+                err_type = type(e).__name__
+                err_msg = str(e)
+                self.progress.emit(f"{label} ❌ Không lấy được thông tin [{err_type}]: {url} — {err_msg}")
                 with lock: failed_urls.append(url)
                 return 'failed', video
 
             if not info:
-                self.progress.emit(f"{label} ❌ Không lấy được thông tin: {url}")
+                self.progress.emit(f"{label} ❌ Không lấy được thông tin (yt-dlp trả về rỗng): {url}")
                 with lock: failed_urls.append(url)
                 return 'failed', video
 
@@ -403,7 +464,8 @@ class DownloaderThread(QThread):
                     with yt_dlp.YoutubeDL(dl_opts) as dl_ydl:
                         dl_ydl.download([url])
                 except Exception as e:
-                    self.progress.emit(f"{label} ⚠️ Thông báo: {str(e)}")
+                    err_type = type(e).__name__
+                    self.progress.emit(f"{label} ⚠️ Lỗi khi tải [{err_type}]: {str(e)}")
 
                 
             if not self.is_running:
@@ -578,7 +640,14 @@ class DownloaderThread(QThread):
                                         else:
                                             permanently_failed[0] += 1
                                             slots_fulfilled[0] += 1
-                                            self.progress.emit(f"⚠️ Cạn dự phòng: Tác vụ {tid+1} không còn video nào để tải bù!")
+                                            # Identify the channel name for better logging
+                                            ch_url = video.get('channel_url', '')
+                                            ch_name = ''
+                                            if ch_url:
+                                                import re as _cre
+                                                _m = _cre.search(r'(@[\w.\-]+)', ch_url)
+                                                ch_name = f" (kênh: {_m.group(1)})" if _m else f" (kênh: {ch_url.rstrip('/').split('/')[-1]})"
+                                            self.progress.emit(f"⚠️ Cạn dự phòng: Tác vụ {tid+1}{ch_name} không còn video nào để tải bù!")
                                             
                                 elif status == 'skipped':
                                     # Just pop another video, don't count as failed
@@ -591,7 +660,13 @@ class DownloaderThread(QThread):
                                         else:
                                             permanently_failed[0] += 1
                                             slots_fulfilled[0] += 1
-                                            self.progress.emit(f"⚠️ Cạn dự phòng: Tác vụ {tid+1} không còn video phù hợp!")
+                                            ch_url2 = video.get('channel_url', '')
+                                            ch_name2 = ''
+                                            if ch_url2:
+                                                import re as _cre2
+                                                _m2 = _cre2.search(r'(@[\w.\-]+)', ch_url2)
+                                                ch_name2 = f" (kênh: {_m2.group(1)})" if _m2 else f" (kênh: {ch_url2.rstrip('/').split('/')[-1]})"
+                                            self.progress.emit(f"⚠️ Cạn dự phòng: Tác vụ {tid+1}{ch_name2} không còn video phù hợp!")
                                             
                                 pct = int(slots_fulfilled[0] * 100 / self.total_target) if self.total_target > 0 else 100
                                 self.percent.emit(pct)
@@ -712,6 +787,33 @@ class DownloadTaskWidget(QGroupBox):
 
         layout.addLayout(row1)
 
+        # Folder Mode Row
+        row_folder_mode = QHBoxLayout()
+        row_folder_mode.addWidget(QLabel("📂 Chế độ lưu:"))
+        self.folder_mode_group = QButtonGroup(self)
+        self.folder_mode_flat = QRadioButton("Thư mục chỉ định")
+        self.folder_mode_flat.setChecked(True)
+        self.folder_mode_flat.setToolTip("Tất cả video tải vào cùng 1 thư mục đã chọn.")
+        self.folder_mode_by_channel = QRadioButton("Subfolder theo @username")
+        self.folder_mode_by_channel.setToolTip("Tự động tạo subfolder riêng cho mỗi kênh, đặt tên theo @username.")
+        self.folder_mode_map_existing = QRadioButton("Ánh xạ folder có sẵn")
+        self.folder_mode_map_existing.setToolTip("Ánh xạ vào folder đã có sẵn — chọn folder từ danh sách con trong thư mục gốc.")
+        self.folder_mode_map_username = QRadioButton("Folder có sẵn = @username")
+        self.folder_mode_map_username.setToolTip("Tìm folder con trong thư mục gốc có tên trùng với @username của kênh, lưu vào đó.")
+        self.folder_mode_group.addButton(self.folder_mode_flat, 0)
+        self.folder_mode_group.addButton(self.folder_mode_by_channel, 1)
+        self.folder_mode_group.addButton(self.folder_mode_map_existing, 2)
+        self.folder_mode_group.addButton(self.folder_mode_map_username, 3)
+        row_folder_mode.addWidget(self.folder_mode_flat)
+        row_folder_mode.addSpacing(10)
+        row_folder_mode.addWidget(self.folder_mode_by_channel)
+        row_folder_mode.addSpacing(10)
+        row_folder_mode.addWidget(self.folder_mode_map_existing)
+        row_folder_mode.addSpacing(10)
+        row_folder_mode.addWidget(self.folder_mode_map_username)
+        row_folder_mode.addStretch()
+        layout.addLayout(row_folder_mode)
+
     def _on_content_type_changed(self):
         self._update_placeholder()
     
@@ -734,10 +836,19 @@ class DownloadTaskWidget(QGroupBox):
         text = self.url_input.toPlainText()
         urls = [line.strip() for line in text.split('\n') if line.strip()]
         content_type = "shorts" if self.content_type_cmb.currentText() == "Shorts" else "videos"
+        if self.folder_mode_by_channel.isChecked():
+            folder_mode = "by_channel"
+        elif self.folder_mode_map_existing.isChecked():
+            folder_mode = "map_existing"
+        elif self.folder_mode_map_username.isChecked():
+            folder_mode = "map_username"
+        else:
+            folder_mode = "flat"
         return {
             'urls': urls,
             'limit': self.limit_spin.value(),
             'folder': self.folder_input.text(),
+            'folder_mode': folder_mode,
             'content_type': content_type
         }
 
@@ -748,6 +859,16 @@ class DownloadTaskWidget(QGroupBox):
             self.limit_spin.setValue(data['limit'])
         if 'folder' in data:
             self.folder_input.setText(data['folder'])
+        if 'folder_mode' in data:
+            fm = data['folder_mode']
+            if fm == 'by_channel':
+                self.folder_mode_by_channel.setChecked(True)
+            elif fm == 'map_existing':
+                self.folder_mode_map_existing.setChecked(True)
+            elif fm == 'map_username':
+                self.folder_mode_map_username.setChecked(True)
+            else:
+                self.folder_mode_flat.setChecked(True)
         if 'content_type' in data:
             if data['content_type'] == 'videos':
                 self.content_type_cmb.setCurrentText("Videos (dài)")
@@ -760,6 +881,10 @@ class DownloadTaskWidget(QGroupBox):
         self.folder_input.setEnabled(enabled)
         self.browse_btn.setEnabled(enabled)
         self.content_type_cmb.setEnabled(enabled)
+        self.folder_mode_flat.setEnabled(enabled)
+        self.folder_mode_by_channel.setEnabled(enabled)
+        self.folder_mode_map_existing.setEnabled(enabled)
+        self.folder_mode_map_username.setEnabled(enabled)
         if hasattr(self, 'remove_btn'):
             self.remove_btn.setEnabled(enabled)
 
@@ -1310,6 +1435,9 @@ class DownloaderTab(QWidget):
     #  Start Fetch: check channels first
     # ------------------------------------------------------------------ #
     def start_fetch(self):
+        import time
+        self.start_time = time.time()
+        
         tasks = []
         for i, w in enumerate(self.task_widgets):
             data = w.get_data()
@@ -1521,7 +1649,7 @@ class DownloaderTab(QWidget):
             self.stop_btn.setEnabled(False)
             return
 
-        # Group by task_id to apply limits per task correctly
+        # Group by task_id → then by channel_url to apply limit PER CHANNEL
         videos_by_task = {}
         for video in available_videos:
             tid = video.get('task_id', 0)
@@ -1534,38 +1662,71 @@ class DownloaderTab(QWidget):
         import random
         for tid, vids in videos_by_task.items():
             task_limit = vids[0].get('limit', 50)
-            
-            # Chỉ trộn ngẫu nhiên nếu không dùng bộ lọc ngày,
-            # vì lọc ngày cần chạy theo thứ tự thời gian để có thể dừng sớm (early stop)
+
+            # ── Apply limit PER CHANNEL ──────────────────────────────────────
+            # Group videos inside this task by channel_url
+            by_channel = {}
+            for v in vids:
+                curl = v.get('channel_url', '__direct__')
+                if curl not in by_channel:
+                    by_channel[curl] = []
+                by_channel[curl].append(v)
+
+            channel_count = len(by_channel)
+
+            # Chia thành: "initial" (đúng số chỉ tiêu) + "reserve" (phần còn lại làm dự phòng bù lỗi)
+            initial_vids = []
+            reserve_vids = []
+            for curl, ch_vids in by_channel.items():
+                if task_limit <= 0:
+                    initial_vids.extend(ch_vids)  # 0 = tất cả, không cần reserve
+                else:
+                    initial_vids.extend(ch_vids[:task_limit])
+                    reserve_vids.extend(ch_vids[task_limit:])  # phần dự phòng
+
+            total_in_queue = len(initial_vids) + len(reserve_vids)
+            if channel_count > 1:
+                self.log_message.emit(
+                    f"📋 [Task {tid+1}] Limit {task_limit if task_limit > 0 else '∞'} video/kênh × "
+                    f"{channel_count} kênh = tối đa {len(initial_vids)} video "
+                    f"(+{len(reserve_vids)} dự phòng bù lỗi)"
+                )
+            elif reserve_vids:
+                self.log_message.emit(
+                    f"📋 [Task {tid+1}] Chỉ tiêu {len(initial_vids)} video "
+                    f"(+{len(reserve_vids)} dự phòng bù lỗi)"
+                )
+
+            # Ghép initial + reserve vào 1 queue: phần đầu = chỉ tiêu, phần sau = dự phòng
+            # Chỉ trộn ngẫu nhiên nếu không dùng bộ lọc ngày
             if date_filter_params['mode'] == "Không lọc":
-                random.shuffle(vids)
+                random.shuffle(initial_vids)
+                random.shuffle(reserve_vids)
             else:
-                # Interleave videos by channel to ensure fair distribution and chronological order
-                by_channel = {}
-                for v in vids:
+                # Interleave initial videos by channel để download song song công bằng
+                by_channel2 = {}
+                for v in initial_vids:
                     curl = v.get('channel_url', 'unknown')
-                    if curl not in by_channel:
-                        by_channel[curl] = []
-                    by_channel[curl].append(v)
+                    if curl not in by_channel2:
+                        by_channel2[curl] = []
+                    by_channel2[curl].append(v)
                 
-                if by_channel:
+                if by_channel2:
                     interleaved = []
-                    max_len = max(len(lst) for lst in by_channel.values())
-                    channel_lists = list(by_channel.values())
+                    max_len = max(len(lst) for lst in by_channel2.values())
+                    channel_lists = list(by_channel2.values())
                     for i in range(max_len):
                         for lst in channel_lists:
                             if i < len(lst):
                                 interleaved.append(lst[i])
-                    vids = interleaved
-                
-            if task_limit <= 0:
-                target = len(vids)
-            else:
-                target = min(len(vids), task_limit)
+                    initial_vids = interleaved
+
+            vids = initial_vids + reserve_vids  # queue = chỉ tiêu + dự phòng
+            target = len(initial_vids)  # target = đúng số chỉ tiêu (không tính reserve)
             tasks_specs[tid] = {
                 'limit': task_limit,
                 'target': target,
-                'queue': vids,   
+                'queue': vids,
                 'success': 0,
                 'failed': 0,
                 'active': 0,
@@ -1613,6 +1774,13 @@ class DownloaderTab(QWidget):
         self.stop_btn.setEnabled(False)
 
     def stop_download(self):
+        import time
+        if hasattr(self, 'start_time'):
+            elapsed = time.time() - self.start_time
+            mins = int(elapsed // 60)
+            secs = int(elapsed % 60)
+            self.log_message.emit(f"⏱️ Tổng thời gian xử lý: {mins} phút {secs} giây.")
+            
         self.log_message.emit("⏹️ Đang dừng quá trình tải/quét...")
         self.info_label.setText("Đang dừng...")
         self.stop_btn.setEnabled(False)
@@ -1636,9 +1804,18 @@ class DownloaderTab(QWidget):
         self.stop_btn.setEnabled(False)
 
         if hasattr(self, 'downloader_thread') and not self.downloader_thread.is_running:
+            import time
+            time_str = ""
+            if hasattr(self, 'start_time'):
+                elapsed = time.time() - self.start_time
+                mins = int(elapsed // 60)
+                secs = int(elapsed % 60)
+                self.log_message.emit(f"⏱️ Tổng thời gian xử lý: {mins} phút {secs} giây.")
+                time_str = f"\nThời gian xử lý: {mins} phút {secs} giây."
+                
             msg = f"⏹️ Đã dừng. Tải thành công {successful} video"
             self.info_label.setText(msg)
-            QMessageBox.information(self, "Đã dừng", f"Quá trình tải đã bị dừng.\n\nĐã tải: {successful} video")
+            QMessageBox.information(self, "Đã dừng", f"Quá trình tải đã bị dừng.\n\nĐã tải: {successful} video{time_str}")
             return
 
         msg = f"✅ Đã tải xong {successful} video"

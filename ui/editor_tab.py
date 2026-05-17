@@ -2,7 +2,7 @@ import os
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
     QLabel, QProgressBar, QDoubleSpinBox, QSpinBox,
-    QFileDialog, QGroupBox, QMessageBox, QCheckBox, QRadioButton, QColorDialog, QSlider, QScrollArea, QLineEdit
+    QFileDialog, QGroupBox, QMessageBox, QCheckBox, QRadioButton, QColorDialog, QSlider, QScrollArea, QLineEdit, QComboBox, QButtonGroup
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
 from PyQt6.QtGui import QColor
@@ -56,9 +56,9 @@ class EstimationThread(QThread):
     """Background thread for calculating compilation estimation for multiple tasks"""
     finished = pyqtSignal(list, int)  # (list of (estimated, video_count), total_videos)
     
-    def __init__(self, sources, settings, processor):
+    def __init__(self, tasks_sources, settings, processor):
         super().__init__()
-        self.sources = sources
+        self.tasks_sources = tasks_sources
         self.settings = settings
         self.processor = processor
     
@@ -66,21 +66,30 @@ class EstimationThread(QThread):
         results = []
         total_videos = 0
         try:
-            for src in self.sources:
-                if not src or src == "Not Selected" or not os.path.exists(src):
+            for sources in self.tasks_sources:
+                if not sources:
                     results.append((-1, 0))
                     continue
                 
-                # estimate_compilations now returns (estimated_compilations, valid_files_count)
-                estimated, video_count = self.processor.estimate_compilations(src, self.settings)
+                task_estimated = 0
+                task_video_count = 0
+                for src in sources:
+                    if not src or src == "Not Selected" or not os.path.exists(src):
+                        continue
+                    
+                    # estimate_compilations now returns (estimated_compilations, valid_files_count)
+                    estimated, video_count = self.processor.estimate_compilations(src, self.settings)
+                    
+                    task_estimated += estimated
+                    task_video_count += video_count
                 
-                total_videos += video_count
-                results.append((estimated, video_count))
+                total_videos += task_video_count
+                results.append((task_estimated, task_video_count))
                 
             self.finished.emit(results, total_videos)
         except Exception as e:
             # Send an array of errors if it unexpectedly crashes
-            self.finished.emit([(-1, 0)] * len(self.sources), 0)
+            self.finished.emit([(-1, 0)] * len(self.tasks_sources), 0)
 
 class EditorTaskWidget(QGroupBox):
     def __init__(self, remove_callback=None, param_callback=None, task_index=1):
@@ -125,11 +134,43 @@ class EditorTaskWidget(QGroupBox):
 
         layout.addLayout(dst_layout)
 
+        # Subfolder Mode Row
+        subfolder_row = QHBoxLayout()
+        subfolder_row.addWidget(QLabel("📂 Chế độ subfolder:"))
+        self.subfolder_mode_group = QButtonGroup(self)
+        self.subfolder_mode_direct = QRadioButton("Xử lý trực tiếp")
+        self.subfolder_mode_direct.setChecked(True)
+        self.subfolder_mode_direct.setToolTip("Xử lý video ngay trong folder nguồn, xuất thẳng ra folder đích.")
+        self.subfolder_mode_auto = QRadioButton("Tự tạo folder theo tên nguồn")
+        self.subfolder_mode_auto.setToolTip(
+            "Folder nguồn chứa các subfolder B,C,D → tự tạo F/B, F/C, F/D trong folder đích."
+        )
+        self.subfolder_mode_map = QRadioButton("Ánh xạ vào folder đích có sẵn")
+        self.subfolder_mode_map.setToolTip(
+            "Folder đích đã có F1,F2,F3 → ánh xạ lần lượt theo thứ tự: subfolder nguồn B→F1, C→F2, D→F3."
+        )
+        self.subfolder_mode_group.addButton(self.subfolder_mode_direct, 0)
+        self.subfolder_mode_group.addButton(self.subfolder_mode_auto, 1)
+        self.subfolder_mode_group.addButton(self.subfolder_mode_map, 2)
+        for rb in (self.subfolder_mode_direct, self.subfolder_mode_auto, self.subfolder_mode_map):
+            rb.toggled.connect(self._on_subfolder_mode_changed)
+        subfolder_row.addWidget(self.subfolder_mode_direct)
+        subfolder_row.addSpacing(12)
+        subfolder_row.addWidget(self.subfolder_mode_auto)
+        subfolder_row.addSpacing(12)
+        subfolder_row.addWidget(self.subfolder_mode_map)
+        subfolder_row.addStretch()
+        layout.addLayout(subfolder_row)
+
         # Estimation Label
         self.est_label = QLabel("Chưa chọn nguồn")
         self.est_label.setWordWrap(True)
         self.est_label.setStyleSheet("color: #64748B; font-size: 11px; font-style: italic; background: transparent; border: none;")
         layout.addWidget(self.est_label)
+
+    def _on_subfolder_mode_changed(self):
+        if self.param_callback:
+            self.param_callback()
 
     def browse_source(self):
         folder = QFileDialog.getExistingDirectory(self, "Select Source Directory")
@@ -142,11 +183,19 @@ class EditorTaskWidget(QGroupBox):
         folder = QFileDialog.getExistingDirectory(self, "Select Output Directory")
         if folder:
             self.dst_label.setText(folder)
-            
+
+    def get_subfolder_mode(self):
+        if self.subfolder_mode_auto.isChecked():
+            return 'auto_create'
+        if self.subfolder_mode_map.isChecked():
+            return 'map_existing'
+        return 'direct'
+
     def get_data(self):
         return {
             'source': self.src_label.text(),
-            'output': self.dst_label.text()
+            'output': self.dst_label.text(),
+            'subfolder_mode': self.get_subfolder_mode(),
         }
 
     def set_data(self, data):
@@ -154,6 +203,14 @@ class EditorTaskWidget(QGroupBox):
             self.src_label.setText(data['source'])
         if 'output' in data:
             self.dst_label.setText(data['output'])
+        if 'subfolder_mode' in data:
+            mode = data['subfolder_mode']
+            if mode == 'auto_create':
+                self.subfolder_mode_auto.setChecked(True)
+            elif mode == 'map_existing':
+                self.subfolder_mode_map.setChecked(True)
+            else:
+                self.subfolder_mode_direct.setChecked(True)
         if self.param_callback:
             self.param_callback()
 
@@ -175,6 +232,9 @@ class EditorTaskWidget(QGroupBox):
     def set_enabled(self, enabled):
         self.src_btn.setEnabled(enabled)
         self.dst_btn.setEnabled(enabled)
+        self.subfolder_mode_direct.setEnabled(enabled)
+        self.subfolder_mode_auto.setEnabled(enabled)
+        self.subfolder_mode_map.setEnabled(enabled)
         if hasattr(self, 'remove_btn'):
             self.remove_btn.setEnabled(enabled)
 
@@ -198,6 +258,12 @@ class EditorTab(QWidget):
         self.estimation_timer.timeout.connect(self.update_estimation)
         
         self.setup_ui()
+        
+        # Auto-load last saved configuration silently if it exists
+        try:
+            self.load_config(silent=True)
+        except Exception:
+            pass
 
     def setup_ui(self):
         layout = QVBoxLayout(self)
@@ -375,6 +441,15 @@ class EditorTab(QWidget):
         self.output_prefix_input = QLineEdit()
         self.output_prefix_input.setPlaceholderText("VD: My Prefix -> Kết quả: My Prefix - ten_file_goc.mp4 (Để trống nếu muốn giữ nguyên)")
         prefix_layout.addWidget(self.output_prefix_input)
+
+        prefix_layout.addSpacing(16)
+        self.date_naming_checkbox = QCheckBox("📅 Tên theo ngày tháng (ddmmyyNN)")
+        self.date_naming_checkbox.setToolTip(
+            "Đặt tên file theo định dạng ngày tháng: ddmmyyNN (ví dụ: 14052601, 14052602...)\n"
+            "Giống format bên AutoCut. Tự động tăng số thứ tự để không bao giờ trùng."
+        )
+        prefix_layout.addWidget(self.date_naming_checkbox)
+
         prefix_group.setLayout(prefix_layout)
         layout.addWidget(prefix_group)
         
@@ -425,6 +500,14 @@ class EditorTab(QWidget):
         self.skip_merge_checkbox.stateChanged.connect(self.update_estimation_debounced)
         self.skip_merge_checkbox.stateChanged.connect(self.toggle_duration_visibility)
         overlay_layout.addWidget(self.skip_merge_checkbox)
+        
+        overlay_layout.addSpacing(10)
+        
+        self.gpu_checkbox = QCheckBox("Sử dụng GPU")
+        self.gpu_checkbox.setChecked(True)
+        self.gpu_checkbox.setStyleSheet("font-weight: bold; color: #27ae60;")
+        self.gpu_checkbox.setToolTip("Sử dụng Card đồ họa (NVIDIA/AMD/Intel) để xử lý nhanh hơn")
+        overlay_layout.addWidget(self.gpu_checkbox)
         
         overlay_layout.addStretch()
         
@@ -508,50 +591,158 @@ class EditorTab(QWidget):
         os.makedirs(settings_dir, exist_ok=True)
         file_path = os.path.join(settings_dir, "editor_config.json")
         
-        tasks_data = [w.get_data() for w in self.task_widgets]
+        # Save both tasks data and all global UI parameters
+        config_data = {
+            "tasks": [w.get_data() for w in self.task_widgets],
+            "global_settings": self.get_current_settings()
+        }
+        
         try:
             with open(file_path, 'w', encoding='utf-8') as f:
-                json.dump(tasks_data, f, indent=4, ensure_ascii=False)
+                json.dump(config_data, f, indent=4, ensure_ascii=False)
             QMessageBox.information(self, "Thành công", f"Đã tự động lưu cấu hình vào:\n{file_path}")
         except Exception as e:
             QMessageBox.critical(self, "Lỗi", f"Không thể lưu cấu hình:\n{e}")
 
-    def load_config(self):
+    def apply_global_settings(self, s):
+        """Restores all saved settings to the respective UI widgets safely."""
+        # 1. Min videos to merge
+        if 'min_videos' in s and hasattr(self, 'min_videos_spin'):
+            self.min_videos_spin.setValue(int(s['min_videos']))
+        
+        # 2. Speeds
+        if 'speed' in s and hasattr(self, 'speed_spin'):
+            self.speed_spin.setValue(float(s['speed']))
+            
+        # 3. Scales
+        if 'scale_x' in s and hasattr(self, 'scalex_spin'):
+            self.scalex_spin.setValue(float(s['scale_x']))
+        if 'scale_y' in s and hasattr(self, 'scaley_spin'):
+            self.scaley_spin.setValue(float(s['scale_y']))
+            
+        # 4. Offsets (Positions)
+        if 'offset_x' in s and hasattr(self, 'offx_spin'):
+            self.offx_spin.setValue(int(s['offset_x']))
+        if 'offset_y' in s and hasattr(self, 'offy_spin'):
+            self.offy_spin.setValue(int(s['offset_y']))
+            
+        # 5. Skip merge mode (Không Ghép / Chỉ Edit lẻ)
+        if 'skip_merge' in s and hasattr(self, 'skip_merge_checkbox'):
+            self.skip_merge_checkbox.setChecked(bool(s['skip_merge']))
+            self.toggle_duration_visibility()
+            
+        # 6. Sorting / prioritization (Ưu tiên view / Xáo trộn)
+        if 'sort_by_views' in s and hasattr(self, 'sort_by_views_radio') and hasattr(self, 'random_shuffle_radio'):
+            if s['sort_by_views']:
+                self.sort_by_views_radio.setChecked(True)
+            else:
+                self.random_shuffle_radio.setChecked(True)
+                
+        # 7. Target Duration Selection
+        if 'duration_mode' in s and hasattr(self, 'duration_under_1min') and hasattr(self, 'duration_free') and hasattr(self, 'duration_over_1min'):
+            mode = s['duration_mode']
+            if mode == 'max':
+                self.duration_under_1min.setChecked(True)
+            elif mode == 'free':
+                self.duration_free.setChecked(True)
+            else:
+                self.duration_over_1min.setChecked(True)
+                
+        # 8. Overlay Color and Opacity
+        if 'overlay_color' in s:
+            self.overlay_color = tuple(s['overlay_color'])
+            if hasattr(self, 'overlay_color_label'):
+                self.overlay_color_label.setStyleSheet(f"background-color: rgb{self.overlay_color}; min-width: 30px;")
+        if 'overlay_opacity' in s and hasattr(self, 'overlay_opacity_slider') and hasattr(self, 'overlay_opacity_label'):
+            self.overlay_opacity = int(s['overlay_opacity'])
+            self.overlay_opacity_slider.setValue(self.overlay_opacity)
+            self.overlay_opacity_label.setText(f"{self.overlay_opacity}%")
+            
+        # 9. Thread Count
+        if 'workers' in s and hasattr(self, 'workers_spin'):
+            self.workers_spin.setValue(int(s['workers']))
+            
+        # 10. Anti-detect / Effects
+        if 'hflip' in s and hasattr(self, 'hflip_checkbox'):
+            self.hflip_checkbox.setChecked(bool(s['hflip']))
+        if 'random_color' in s and hasattr(self, 'random_color_checkbox'):
+            self.random_color_checkbox.setChecked(bool(s['random_color']))
+        if 'film_grain' in s and hasattr(self, 'film_grain_checkbox'):
+            self.film_grain_checkbox.setChecked(bool(s['film_grain']))
+            
+        # 11. Input Filtering
+        if 'only_under_1min' in s and hasattr(self, 'only_under_1min_checkbox'):
+            self.only_under_1min_checkbox.setChecked(bool(s['only_under_1min']))
+        if 'trim_long_videos' in s and hasattr(self, 'trim_long_videos_checkbox'):
+            self.trim_long_videos_checkbox.setChecked(bool(s['trim_long_videos']))
+            
+        # 12. Output Naming / Prefix
+        if 'output_prefix' in s and hasattr(self, 'output_prefix_input'):
+            self.output_prefix_input.setText(str(s['output_prefix']))
+        if 'date_naming' in s and hasattr(self, 'date_naming_checkbox'):
+            self.date_naming_checkbox.setChecked(bool(s['date_naming']))
+            
+        # 13. GPU Use
+        if 'use_gpu' in s and hasattr(self, 'gpu_checkbox'):
+            self.gpu_checkbox.setChecked(bool(s['use_gpu']))
+
+    def load_config(self, silent=False):
+        # PyQt6 clicked signal checked parameter is passed as first arg when connected directly.
+        # Force silent=False if it's a bool that comes from a button click instead of an explicit silent=True call.
+        if isinstance(silent, bool) and silent is False:
+            pass
+        elif not isinstance(silent, bool):
+            silent = False
+
         import json
         import os
         file_path = os.path.join(os.getcwd(), "settings", "editor_config.json")
         
         if not os.path.exists(file_path):
-            QMessageBox.warning(self, "Chưa có cấu hình", "Bạn chưa lưu cấu hình Editor nào (chưa có file editor_config.json trong thư mục settings).")
+            if not silent:
+                QMessageBox.warning(self, "Chưa có cấu hình", "Bạn chưa lưu cấu hình Editor nào (chưa có file editor_config.json trong thư mục settings).")
             return
 
         try:
             with open(file_path, 'r', encoding='utf-8') as f:
-                tasks_data = json.load(f)
+                config_data = json.load(f)
             
-            if not isinstance(tasks_data, list):
-                raise ValueError("Định dạng file không hợp lệ (cần danh sách tác vụ).")
+            # Support legacy format (list) and new format (dict)
+            if isinstance(config_data, list):
+                tasks_data = config_data
+                global_settings = None
+            elif isinstance(config_data, dict):
+                tasks_data = config_data.get("tasks", [])
+                global_settings = config_data.get("global_settings", None)
+            else:
+                raise ValueError("Định dạng cấu hình không hợp lệ.")
             
-            # Xóa các tác vụ cũ
+            # Clear old tasks
             while len(self.task_widgets) > 0:
                 widget = self.task_widgets.pop()
                 self.tasks_layout.removeWidget(widget)
                 widget.deleteLater()
             self.task_counter = 0
 
-            # Thêm tác vụ mới
+            # Add tasks from file
             for i, data in enumerate(tasks_data):
                 self.add_task_widget(is_first=(i==0))
                 self.task_widgets[-1].set_data(data)
             
-            # Trường hợp file json trống
+            # Fallback for empty list
             if not self.task_widgets:
                 self.add_task_widget(is_first=True)
 
+            # Apply saved global settings
+            if global_settings:
+                self.apply_global_settings(global_settings)
+
             self.update_estimation_debounced()
-            QMessageBox.information(self, "Thành công", "Đã tải cấu hình Editor tự động!")
+            if not silent:
+                QMessageBox.information(self, "Thành công", "Đã tải cấu hình Editor tự động!")
         except Exception as e:
-            QMessageBox.critical(self, "Lỗi", f"Không thể tải cấu hình:\n{e}")
+            if not silent:
+                QMessageBox.critical(self, "Lỗi", f"Không thể tải cấu hình:\n{e}")
 
     def update_overlay_opacity_display(self, value):
         self.overlay_opacity = value
@@ -593,7 +784,9 @@ class EditorTab(QWidget):
             'film_grain': getattr(self, 'film_grain_checkbox', None) and self.film_grain_checkbox.isChecked(),
             'only_under_1min': self.only_under_1min_checkbox.isChecked(),
             'trim_long_videos': getattr(self, 'trim_long_videos_checkbox', None) and self.trim_long_videos_checkbox.isChecked(),
-            'output_prefix': getattr(self, 'output_prefix_input', None) and self.output_prefix_input.text().strip()
+            'output_prefix': getattr(self, 'output_prefix_input', None) and self.output_prefix_input.text().strip(),
+            'date_naming': getattr(self, 'date_naming_checkbox', None) and self.date_naming_checkbox.isChecked(),
+            'use_gpu': self.gpu_checkbox.isChecked(),
         }
 
     def toggle_duration_visibility(self):
@@ -607,7 +800,7 @@ class EditorTab(QWidget):
         self.estimation_timer.start(500)
     
     def update_estimation(self):
-        sources = [w.get_data()['source'] for w in self.task_widgets]
+        raw_tasks = [w.get_data() for w in self.task_widgets]
         
         self.global_est_label.setText("⏳ Đang thiết lập bảng tính dữ liệu...")
         self.run_btn.setEnabled(False)
@@ -615,6 +808,20 @@ class EditorTab(QWidget):
         self.progress_bar.setMaximum(0)
         
         settings = self.get_current_settings()
+        
+        tasks_sources = []
+        for task in raw_tasks:
+            if not task['source'] or task['source'] == "Not Selected" or not os.path.exists(task['source']):
+                tasks_sources.append([])
+                continue
+                
+            # Temporarily set output if missing to prevent expansion errors
+            if not task.get('output') or task['output'] == "Not Selected":
+                task['output'] = task['source']
+                
+            expanded = self._expand_subfolder_tasks([task], silent=True)
+            sources = [t['source'] for t in expanded]
+            tasks_sources.append(sources)
         
         if self.estimation_thread and self.estimation_thread.isRunning():
             try:
@@ -626,7 +833,7 @@ class EditorTab(QWidget):
             self._old_threads.append(self.estimation_thread)
             self._old_threads = [t for t in self._old_threads if t.isRunning()]
         
-        self.estimation_thread = EstimationThread(sources, settings, self.processor)
+        self.estimation_thread = EstimationThread(tasks_sources, settings, self.processor)
         self.estimation_thread.finished.connect(self.on_estimation_finished)
         self.estimation_thread.start()
     
@@ -662,15 +869,141 @@ class EditorTab(QWidget):
         self.run_btn.setEnabled(can_run)
 
 
+    def _expand_subfolder_tasks(self, raw_tasks, silent=False):
+        """
+        Expand tasks that use subfolder modes into individual (source, output) pairs.
+        
+        - direct: pass through as-is.
+        - auto_create: enumerate subdirs of source, create matching subdirs in output.
+          e.g. source=A (has B,C,D), output=F → tasks for (A/B→F/B), (A/C→F/C), (A/D→F/D)
+        - map_existing: enumerate subdirs of source (sorted), enumerate subdirs of output (sorted),
+          zip them 1-to-1: source_subfolder[i] → output_subfolder[i]
+          e.g. source subs [B,C,D], output subs [F1,F2,F3] → (A/B→F/F1), (A/C→F/F2), (A/D→F/F3)
+        """
+        def _log(msg):
+            if not silent:
+                self.log_message.emit(msg)
+                
+        expanded = []
+        for task in raw_tasks:
+            mode = task.get('subfolder_mode', 'direct')
+            src_root = task['source']
+            dst_root = task['output']
+
+            if mode == 'direct':
+                expanded.append(task)
+                continue
+
+            # Collect source subdirectories — strategy depends on mode:
+            # • auto_create: only folders that currently have videos (skip empties)
+            # • map_existing: ALL subfolders sorted alphabetically (ignore video presence)
+            #   so the index-based mapping stays stable across multiple runs even after
+            #   videos are processed and moved to unused_videos.
+            video_exts = {'.mp4', '.mkv', '.avi', '.mov', '.webm', '.flv', '.wmv'}
+            _SKIP_DIRS = {'unused_videos'}  # created by processor, never a real channel folder
+
+            try:
+                if mode == 'map_existing':
+                    # Stable mapping: include every subfolder regardless of content
+                    src_subs = sorted([
+                        d for d in os.listdir(src_root)
+                        if os.path.isdir(os.path.join(src_root, d))
+                        and d not in _SKIP_DIRS
+                    ])
+                else:
+                    # auto_create: only process folders that still have videos
+                    src_subs = sorted([
+                        d for d in os.listdir(src_root)
+                        if os.path.isdir(os.path.join(src_root, d))
+                        and d not in _SKIP_DIRS
+                        and any(
+                            f.lower().endswith(tuple(video_exts))
+                            for f in os.listdir(os.path.join(src_root, d))
+                        )
+                    ])
+            except Exception as e:
+                _log(f"⚠️ Không đọc được subfolder của nguồn '{src_root}': {e}")
+                expanded.append(task)  # fall back to direct
+                continue
+
+            if not src_subs:
+                _log(f"⚠️ Không tìm thấy subfolder có video trong: {src_root}. Xử lý trực tiếp.")
+                expanded.append(task)
+                continue
+
+            if mode == 'auto_create':
+                for sub in src_subs:
+                    new_task = dict(task)
+                    new_task['source'] = os.path.join(src_root, sub)
+                    new_task['output'] = os.path.join(dst_root, sub)
+                    os.makedirs(new_task['output'], exist_ok=True)
+                    new_task['subfolder_mode'] = 'direct'
+                    expanded.append(new_task)
+                _log(
+                    f"📂 [auto_create] Tìm thấy {len(src_subs)} subfolder trong '{os.path.basename(src_root)}': "
+                    + ", ".join(src_subs)
+                )
+
+            elif mode == 'map_existing':
+                try:
+                    dst_subs = sorted([
+                        d for d in os.listdir(dst_root)
+                        if os.path.isdir(os.path.join(dst_root, d))
+                    ])
+                except Exception as e:
+                    _log(f"⚠️ Không đọc được subfolder của đích '{dst_root}': {e}")
+                    expanded.append(task)
+                    continue
+
+                if not dst_subs:
+                    _log(f"⚠️ Folder đích '{dst_root}' không có subfolder nào để ánh xạ. Xử lý trực tiếp.")
+                    expanded.append(task)
+                    continue
+
+                pairs = list(zip(src_subs, dst_subs))
+                mapping_info = ", ".join(f"{s}→{d}" for s, d in pairs)
+                _log(
+                    f"📂 [map_existing] Ánh xạ {len(pairs)} cặp folder: {mapping_info}"
+                )
+                for src_sub, dst_sub in pairs:
+                    new_task = dict(task)
+                    new_task['source'] = os.path.join(src_root, src_sub)
+                    new_task['output'] = os.path.join(dst_root, dst_sub)
+                    new_task['subfolder_mode'] = 'direct'
+                    expanded.append(new_task)
+
+                if len(src_subs) > len(dst_subs):
+                    unmatched = src_subs[len(dst_subs):]
+                    _log(
+                        f"⚠️ {len(unmatched)} subfolder nguồn không có cặp đích (thiếu folder): {', '.join(unmatched)}"
+                    )
+                elif len(dst_subs) > len(src_subs):
+                    unmatched = dst_subs[len(src_subs):]
+                    _log(
+                        f"⚠️ {len(unmatched)} subfolder đích không có cặp nguồn: {', '.join(unmatched)}"
+                    )
+
+        return expanded
+
     def start_processing(self):
-        tasks = []
+        import time
+        self.start_time = time.time()
+        
+        raw_tasks = []
         for i, w in enumerate(self.task_widgets):
             data = w.get_data()
             if data['source'] != "Not Selected" and data['output'] != "Not Selected":
-                tasks.append(data)
+                raw_tasks.append(data)
                 
-        if not tasks:
+        if not raw_tasks:
             QMessageBox.warning(self, "Lỗi Input", "Vui lòng chỉ định rõ thư mục Nguồn và Đích ở ít nhất 1 tác vụ!")
+            return
+
+        # Expand subfolder tasks before processing
+        tasks = self._expand_subfolder_tasks(raw_tasks)
+
+        if not tasks:
+            QMessageBox.warning(self, "Lỗi", "Không có tác vụ nào được tạo sau khi xử lý chế độ subfolder!")
             return
 
         settings = self.get_current_settings()
@@ -702,6 +1035,13 @@ class EditorTab(QWidget):
         self.run_btn.setText("▶ Start Processing")
         self.stop_btn.setEnabled(False)
         self.progress_bar.setVisible(False)
+        
+        import time
+        if hasattr(self, 'start_time'):
+            elapsed = time.time() - self.start_time
+            mins = int(elapsed // 60)
+            secs = int(elapsed % 60)
+            self.log_message.emit(f"⏱️ Tổng thời gian xử lý: {mins} phút {secs} giây.")
         
         if self.processor_thread and not self.processor_thread.is_running:
             QMessageBox.information(self, "Stopped", "Processing was stopped by user.")
