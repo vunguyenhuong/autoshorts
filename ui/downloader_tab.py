@@ -174,7 +174,7 @@ class DownloaderThread(QThread):
 
     WORKERS = 10  # default, overridden by UI spinbox
 
-    def __init__(self, tasks_specs, total_target, skip_downloaded=True, workers=10, date_filter=None, selected_language=None):
+    def __init__(self, tasks_specs, total_target, skip_downloaded=True, workers=10, date_filter=None, selected_language=None, allow_vertical_long=False):
         super().__init__()
         self.tasks_specs = tasks_specs
         self.total_target = total_target
@@ -184,6 +184,7 @@ class DownloaderThread(QThread):
         self.downloader = ShortsDownloader()
         self.workers = workers
         self.is_running = True
+        self.allow_vertical_long = allow_vertical_long
 
     def stop(self):
         self.is_running = False
@@ -321,7 +322,9 @@ class DownloaderThread(QThread):
                 is_direct = video.get('channel_url') is None or "Video Trực Tiếp" in video.get('title', "")
                 
                 if content_type == 'videos' and width < height:
-                    if is_direct:
+                    if self.allow_vertical_long:
+                        self.progress.emit(f"{label} ℹ️ Tải video dài định dạng dọc theo tùy chọn: {url}")
+                    elif is_direct:
                         self.progress.emit(f"{label} ⚠️ Cảnh báo: Video này là định dạng dọc nhưng bạn đang ở chế độ Video ngang. Vẫn tiếp tục tải...")
                     else:
                         self.progress.emit(f"{label} ⏭️ Bỏ qua (Video dọc không phù hợp chế độ Video ngang): {url}")
@@ -964,6 +967,10 @@ class DownloaderTab(QWidget):
         row2.addWidget(self.skip_downloaded_cb)
 
         row2.addSpacing(20)
+        self.allow_vertical_long_cb = QCheckBox("Tải video dài khung hình dọc")
+        self.allow_vertical_long_cb.setChecked(False)
+        self.allow_vertical_long_cb.setToolTip("Cho phép tải video dài nhưng có khung hình dọc (width < height)")
+        row2.addWidget(self.allow_vertical_long_cb)
 
         row2.addSpacing(20)
         row2.addWidget(QLabel("Ngôn ngữ lồng tiếng:"))
@@ -1746,6 +1753,7 @@ class DownloaderTab(QWidget):
 
         workers = self.workers_spin.value()
         selected_language = self.language_cmb.currentText()
+        allow_vertical_long = self.allow_vertical_long_cb.isChecked()
 
         if selected_language != "Mặc định":
             self.log_message.emit(f"🌐 Bộ lọc ngôn ngữ: {selected_language} đang bật — chỉ tải video có bản lồng tiếng phù hợp.")
@@ -1757,7 +1765,8 @@ class DownloaderTab(QWidget):
             skip_downloaded=False,  # Already filtered above
             workers=workers,
             date_filter=date_filter_params,
-            selected_language=selected_language
+            selected_language=selected_language,
+            allow_vertical_long=allow_vertical_long
         )
         self.downloader_thread.percent.connect(self.progress_bar.setValue)
         self.downloader_thread.finished.connect(self._on_download_finished)
@@ -1833,5 +1842,7 @@ class DownloaderTab(QWidget):
         self.add_task_btn.setEnabled(enabled)
         if hasattr(self, 'language_cmb'):
             self.language_cmb.setEnabled(enabled)
+        if hasattr(self, 'allow_vertical_long_cb'):
+            self.allow_vertical_long_cb.setEnabled(enabled)
         for w in self.task_widgets:
             w.set_enabled(enabled)
