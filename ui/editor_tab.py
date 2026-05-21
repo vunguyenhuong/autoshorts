@@ -22,16 +22,18 @@ class VideoProcessorThread(QThread):
 
     def run(self):
         self.progress.emit(f"🚀 Bắt đầu xử lý {len(self.tasks)} task...")
-        try:
-            for i, task in enumerate(self.tasks):
-                if not self.is_running:
-                    self.progress.emit("Bị gián đoạn bởi người dùng.")
-                    break
-                
-                self.progress.emit(f"\n--- 🎞️ Đang chạy task {i+1}/{len(self.tasks)} ---")
-                self.progress.emit(f"Nguồn: {task['source']}")
-                self.progress.emit(f"Đích: {task['output']}")
-                
+        completed = 0
+        failed = 0
+        for i, task in enumerate(self.tasks):
+            if not self.is_running:
+                self.progress.emit("⏹️ Bị gián đoạn bởi người dùng.")
+                break
+            
+            self.progress.emit(f"\n--- 🎞️ Đang chạy task {i+1}/{len(self.tasks)} ---")
+            self.progress.emit(f"Nguồn: {task['source']}")
+            self.progress.emit(f"Đích: {task['output']}")
+            
+            try:
                 self.processor.process_compilations(
                     task['source'], 
                     task['output'], 
@@ -39,8 +41,16 @@ class VideoProcessorThread(QThread):
                     progress_callback=self.emit_log,
                     check_cancel=self.check_cancel
                 )
-        except Exception as e:
-            self.progress.emit(f"Critical Error: {e}")
+                completed += 1
+                self.progress.emit(f"✅ Task {i+1}/{len(self.tasks)} hoàn tất.")
+            except Exception as e:
+                failed += 1
+                import traceback
+                self.progress.emit(f"❌ Task {i+1}/{len(self.tasks)} LỖI: {e}")
+                self.progress.emit(f"📋 Chi tiết: {traceback.format_exc()}")
+                self.progress.emit(f"⏭️ Bỏ qua task lỗi, tiếp tục task tiếp theo...")
+        
+        self.progress.emit(f"\n📊 Kết quả: {completed} thành công, {failed} lỗi / {len(self.tasks)} tổng task")
         self.finished.emit()
 
     def emit_log(self, msg):

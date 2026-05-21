@@ -423,30 +423,36 @@ class ShortsDownloader:
         """
         Download videos using yt_dlp Python library.
         Strategy: Download best 1080p quality (any codec), then auto-convert to H.264 via FFmpeg.
+
+        After all downloads finish:
+        - Runs a final full cleanup of all non-.mp4 files in the output folder.
+        - Counts actual .mp4 files and compares against the requested count.
+        - Logs a clear completion summary (success or warning if count is short).
         """
         if not os.path.exists(download_path):
             os.makedirs(download_path)
 
         urls_to_download = []
         skipped_count = 0
-        
+
         for url in video_urls:
             if skip_downloaded and channel_url and self.history.is_downloaded(channel_url, url):
                 skipped_count += 1
                 if logger: logger.info(f"Skipping already downloaded: {url}")
             else:
                 urls_to_download.append(url)
-        
+
         if logger and skipped_count > 0:
             logger.info(f"Skipped {skipped_count} already downloaded videos")
-        
+
         if not urls_to_download:
             return
 
         import yt_dlp
-        
+
         # Find ffmpeg location
         ffmpeg_location = self._find_ffmpeg()
+        requested_count = len(urls_to_download)
 
         for url in urls_to_download:
             if logger: logger.info(f"Downloading: {url}")
@@ -461,7 +467,7 @@ class ShortsDownloader:
             try:
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                     error_code = ydl.download([url])
-                    
+
                 if error_code == 0:
                     if logger: logger.info(f"✅ Saved successfully: {url}")
                     if channel_url:
@@ -470,49 +476,100 @@ class ShortsDownloader:
                     if logger: logger.error(f"❌ Download failed for: {url}")
             except Exception as e:
                 if logger: logger.error(f"❌ Error downloading {url}: {e}")
+            finally:
+                # Clean up leftover fragment/partial files after each video
+                self._cleanup_fragments(download_path, logger)
+
+        # ── Final cleanup & verification ────────────────────────────────────────
+        # One more full sweep to catch anything missed during the loop
+        self._cleanup_fragments(download_path, logger)
+
+        # Count valid .mp4 files actually present in the output folder
+        mp4_files = [
+            f for f in os.listdir(download_path)
+            if f.lower().endswith('.mp4') and os.path.isfile(os.path.join(download_path, f))
+        ]
+        actual_count = len(mp4_files)
+
+        if logger:
+            logger.info(f"─" * 50)
+            logger.info(f"📁 Thư mục lưu: {download_path}")
+            logger.info(f"🎯 Yêu cầu tải:  {requested_count} video")
+            logger.info(f"✅ Số file .mp4:  {actual_count} file")
+            if actual_count >= requested_count:
+                logger.info(f"🎉 Hoàn thành! Đã tải đủ {actual_count}/{requested_count} video .mp4.")
+            else:
+                missing = requested_count - actual_count
+                logger.warning(
+                    f"⚠️ Chưa đủ: chỉ có {actual_count}/{requested_count} file .mp4. "
+                    f"Thiếu {missing} video (có thể bị lỗi hoặc bị xóa do không merge được)."
+                )
+            logger.info(f"─" * 50)
 
     def _build_ydl_opts(self, output_dir, ffmpeg_location=None, language=None):
         """
         Build yt-dlp options dict for downloading YouTube Shorts at 1080p H.264.
-        
-        Proven strategy (tested & verified):
-        - Client: 'android_vr' — bypasses YouTube PO Token requirement, 
+
+        Strategy:
+        - Client: 'android_vr' — bypasses YouTube PO Token requirement,
           provides full 1080p H.264 streams without 403 errors.
-        - Format: prioritize height>=1080, then sort by resolution first, 
-          then prefer H.264 (avc) codec.
-        - Result: 1080x1920 H.264 60fps confirmed.
-        
+        - Format: prioritize H.264/AVC codec explicitly via vcodec filter so that
+          yt-dlp never selects VP9/AV1 free-format streams (which produce .f137 etc.).
+        - prefer_free_formats=False: prevent yt-dlp from auto-upgrading to WebM/VP9.
+        - merge_output_format + FFmpegVideoRemuxer: guarantee the merged file is .mp4.
+        - postprocessor_args FFmpeg flags: ensure stream copy remux into mp4 container.
+
         Args:
             language: If provided (e.g. 'de-DE'), only download formats with that language tag.
-                      Videos without this audio track will be skipped if combined formats are used.
         """
         if language and language != "Mặc định":
-            # BỘ LỌC NGÔN NGỮ: Chỉ tải các bản lồng tiếng phù hợp, bắt buộc phải có video
+            # BỘ LỌC NGÔN NGỮ: ưu tiên H.264 + m4a, sau đó fallback
             fmt = (
+                f'bestvideo[height>=1080][vcodec^=avc1][ext=mp4]+bestaudio[language={language}][ext=m4a]/'
+                f'bestvideo[vcodec^=avc1][ext=mp4]+bestaudio[language={language}][ext=m4a]/'
                 f'bestvideo[height>=1080][ext=mp4]+bestaudio[language={language}][ext=m4a]/'
                 f'bestvideo[ext=mp4]+bestaudio[language={language}][ext=m4a]/'
-                f'bestvideo+bestaudio[language={language}]/'
+                f'bestvideo[vcodec^=avc1]+bestaudio[language={language}]/'
+                f'bestvideo[height>=1080][vcodec^=avc1][ext=mp4]+bestaudio[ext=m4a]/'
+                f'bestvideo[vcodec^=avc1][ext=mp4]+bestaudio[ext=m4a]/'
                 f'bestvideo[height>=1080][ext=mp4]+bestaudio[ext=m4a]/'
                 f'bestvideo[ext=mp4]+bestaudio[ext=m4a]/'
                 f'bestvideo+bestaudio/'
                 f'best[vcodec!=none]'
             )
         else:
-            # Chế độ mặc định: tải chất lượng cao nhất, bắt buộc phải có video
+            # Chế độ mặc định: ưu tiên H.264 (avc1), sau đó fallback dần
             fmt = (
+                'bestvideo[height>=1080][vcodec^=avc1][ext=mp4]+bestaudio[ext=m4a]/'
+                'bestvideo[vcodec^=avc1][ext=mp4]+bestaudio[ext=m4a]/'
                 'bestvideo[height>=1080][ext=mp4]+bestaudio[ext=m4a]/'
                 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/'
+                'bestvideo[vcodec^=avc1]+bestaudio/'
                 'bestvideo+bestaudio/'
                 'best[vcodec!=none]'
             )
 
         opts = {
             'format': fmt,
-            'format_sort': ['res', 'vcodec:avc'],
+            # Sort: resolution first, then prefer H.264 (avc), then prefer mp4 container
+            'format_sort': ['res', 'vcodec:avc', 'ext:mp4:m4a'],
+            # Block yt-dlp from auto-upgrading to VP9/AV1 "free" formats
+            'prefer_free_formats': False,
+            # Final merged container must be mp4
             'merge_output_format': 'mp4',
             'outtmpl': os.path.join(output_dir, '%(title)s [%(id)s].%(ext)s'),
-            
-            # android_vr client: the ONLY client that provides 1080p H.264 without PO Token
+
+            # Force remux into mp4 container after merge
+            'postprocessors': [{
+                'key': 'FFmpegVideoRemuxer',
+                'preferedformat': 'mp4',
+            }],
+            # FFmpeg args: stream copy (no re-encode) for fast, lossless remux
+            'postprocessor_args': {
+                'ffmpeg': ['-c', 'copy'],
+            },
+
+            # android_vr client: provides 1080p H.264 without PO Token
             'extractor_args': {
                 'youtube': {
                     'player_client': ['android_vr']
@@ -521,16 +578,78 @@ class ShortsDownloader:
             'http_headers': {
                 'User-Agent': 'Mozilla/5.0'
             },
-            
-            # Reliability and Speed settings
+
+            # Reliability settings
             'retries': 10,
+            'fragment_retries': 10,
             'ignoreerrors': True,
             'no_warnings': True,
             'quiet': True,
+            'noprogress': True,
+
+            # Delete intermediate/fragment files, keep only final .mp4
+            'keepvideo': False,
         }
 
         if ffmpeg_location:
             opts['ffmpeg_location'] = ffmpeg_location
-            
+
         return opts
+
+    def _cleanup_fragments(self, download_path, logger=None):
+        """Remove leftover fragment and partial files from failed/interrupted downloads.
+        
+        Removes:
+        - .part, .ytdl, .temp files (yt-dlp temp files)
+        - .f137, .f140, .f251, .fNNN files (raw stream fragment dumps)
+        - Any file whose base name contains a fragment suffix (e.g. "title.f137.mp4")
+        - Any non-.mp4 video file that was left behind (webm, mkv, ts, m4v, etc.)
+          — these indicate a failed merge and should be deleted to avoid confusing
+          the processor with broken partial video data.
+        """
+        import re
+        # Match .f137, .f140, .f251, etc.
+        fragment_re = re.compile(r'\.f\d+$', re.IGNORECASE)
+        # Known yt-dlp temp extensions
+        junk_exts = ('.part', '.ytdl', '.temp', '.vtt', '.srt')
+        # Non-mp4 video containers that should NOT be kept (failed merge artifacts)
+        stray_video_exts = ('.webm', '.mkv', '.ts', '.m4v', '.avi', '.mov', '.flv', '.3gp')
+
+        try:
+            for fname in os.listdir(download_path):
+                fpath = os.path.join(download_path, fname)
+                if not os.path.isfile(fpath):
+                    continue
+
+                name_lower = fname.lower()
+                base, ext = os.path.splitext(fname)
+                ext_lower = ext.lower()
+                is_junk = False
+
+                # 1. Known temp/partial suffixes
+                if any(name_lower.endswith(e) for e in junk_exts):
+                    is_junk = True
+
+                # 2. Raw fragment extensions: .f137, .f140, etc.
+                elif fragment_re.match(ext_lower):
+                    is_junk = True
+
+                # 3. Double-extension patterns: e.g. "video.f137.mp4" — base contains .fNNN
+                elif fragment_re.search(base):
+                    is_junk = True
+
+                # 4. Stray non-mp4 video containers (failed merge left-overs)
+                elif ext_lower in stray_video_exts:
+                    is_junk = True
+
+                if is_junk:
+                    try:
+                        os.remove(fpath)
+                        if logger:
+                            logger.info(f"🗑️ Đã xóa file rác: {fname}")
+                    except Exception as e:
+                        if logger:
+                            logger.warning(f"⚠️ Không xóa được {fname}: {e}")
+        except Exception:
+            pass
 
