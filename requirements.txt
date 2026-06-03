@@ -3,3 +3,4 @@ pyqtdarktheme
 yt-dlp
 Pillow
 requests
+selenium

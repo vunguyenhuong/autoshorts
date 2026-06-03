@@ -11,6 +11,9 @@ from ui.downloader_tab import DownloaderTab
 from ui.editor_tab import EditorTab
 from ui.autocut_tab import AutoCutTab
 from ui.adb_tab import AdbTab
+from ui.tiktok_douyin_tab import TiktokDouyinTab
+from ui.gpm_upload_tab import GpmUploadTab
+from ui.yt_search_tab import YtSearchTab
 from ui.components import SidebarNavButton, TerminalLog
 from core.downloader import YtdlpUpdater
 import ui.theme as theme
@@ -24,6 +27,9 @@ class SidebarWidget(QFrame):
         ("✂️",  "Editor"),
         ("🎬", "AutoCut"),
         ("📱", "ADB"),
+        ("🎵", "TikTok DL"),
+        ("🔎", "YT Finder"),
+        ("🚀", "TikTok UP"),
     ]
 
     def __init__(self, on_navigate, parent=None):
@@ -268,8 +274,11 @@ class MainWindow(QMainWindow):
         self.editor_tab = EditorTab()
         self.autocut_tab = AutoCutTab()
         self.adb_tab = AdbTab()
+        self.social_dl_tab = TiktokDouyinTab()
+        self.yt_search_tab = YtSearchTab()
+        self.gpm_upload_tab = GpmUploadTab()
 
-        for tab in (self.downloader_tab, self.editor_tab, self.autocut_tab, self.adb_tab):
+        for tab in (self.downloader_tab, self.editor_tab, self.autocut_tab, self.adb_tab, self.social_dl_tab, self.yt_search_tab, self.gpm_upload_tab):
             wrapper = QWidget()
             wl = QVBoxLayout(wrapper)
             wl.setContentsMargins(16, 16, 16, 16)
@@ -356,6 +365,9 @@ class MainWindow(QMainWindow):
         self.editor_tab.log_message.connect(self.append_log)
         self.autocut_tab.log_message.connect(self.append_log)
         self.adb_tab.log_message.connect(self.append_log)
+        self.social_dl_tab.log_message.connect(self.append_log)
+        self.yt_search_tab.log_message.connect(self.append_log)
+        self.gpm_upload_tab.log_message.connect(self.append_log)
 
     # ── Navigation ──────────────────────────────────────────────────────────
 
@@ -419,3 +431,42 @@ class MainWindow(QMainWindow):
     def append_log(self, msg: str):
         ts = datetime.datetime.now().strftime("%H:%M:%S")
         self.log_area.append_log(f"[{ts}] {msg}")
+
+    def closeEvent(self, event):
+        """Gracefully stop all background workers before closing to avoid crash."""
+        # Stop GPM upload worker nếu đang chạy
+        try:
+            worker = getattr(self.gpm_upload_tab, '_worker', None)
+            if worker and worker.isRunning():
+                worker.stop()
+                worker.wait(8000)  # Chờ tối đa 8 giây
+        except Exception:
+            pass
+
+        # Stop GPM open-profiles thread nếu đang chạy
+        try:
+            open_thread = getattr(self.gpm_upload_tab, '_open_thread', None)
+            if open_thread and open_thread.isRunning():
+                open_thread.quit()
+                open_thread.wait(3000)
+        except Exception:
+            pass
+
+        # Stop các tab worker khác nếu có
+        for tab_name in ('downloader_tab', 'editor_tab', 'autocut_tab', 'adb_tab', 'social_dl_tab', 'yt_search_tab'):
+            try:
+                tab = getattr(self, tab_name, None)
+                if tab is None:
+                    continue
+                for attr in ('_worker', '_thread', '_scan_thread'):
+                    t = getattr(tab, attr, None)
+                    if t and hasattr(t, 'isRunning') and t.isRunning():
+                        if hasattr(t, 'stop'):
+                            t.stop()
+                        t.quit()
+                        t.wait(3000)
+            except Exception:
+                pass
+
+        event.accept()
+

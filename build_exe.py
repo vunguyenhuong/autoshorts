@@ -17,6 +17,9 @@ args = [
     '--windowed',
     '--icon=icons/icon.ico',
     '--add-data=icons;icons',  # Include icons folder
+    '--collect-all=selenium',  # Collect all selenium submodules, data, and binaries
+    '--collect-all=trio',      # Collect all trio submodules, data, and binaries
+    '--collect-all=trio_websocket', # Collect all trio-websocket submodules, data, and binaries
     '--clean',
     '--noconfirm',
     # Exclude unnecessary heavy modules if not used
