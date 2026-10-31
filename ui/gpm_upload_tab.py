@@ -867,6 +867,69 @@ class GpmUploadTab(QWidget):
             QMessageBox.warning(self, "Chưa chọn profile", "Hãy chọn ít nhất 1 profile.")
             return
 
+        # ── Kiểm tra số lượng video đủ chia cho các profile ──────────
+        videos_per_profile = self._limit_spin.value()
+        if videos_per_profile > 0:
+            VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".flv", ".wmv", ".m4v"}
+
+            def count_videos_in_folder(folder_path: str) -> int:
+                try:
+                    return sum(
+                        1 for f in os.listdir(folder_path)
+                        if os.path.splitext(f)[1].lower() in VIDEO_EXTS
+                        and os.path.isfile(os.path.join(folder_path, f))
+                    )
+                except Exception:
+                    return 0
+
+            if shared_mode:
+                # Tất cả profile dùng chung 1 folder
+                n_profiles = len(selected_profiles)
+                total_needed = videos_per_profile * n_profiles
+                total_available = count_videos_in_folder(shared_folder)
+                if total_available < total_needed:
+                    msg = (
+                        f"⚠️  Không đủ video để phân phối!\n\n"
+                        f"• Số profile được chọn: {n_profiles}\n"
+                        f"• Video/profile cài đặt: {videos_per_profile}\n"
+                        f"• Tổng video cần: {total_needed}\n"
+                        f"• Video có trong folder: {total_available}\n\n"
+                        f"Bạn có muốn tiếp tục chạy với số video hiện có không?"
+                    )
+                    reply = QMessageBox.question(
+                        self, "Không đủ video",
+                        msg,
+                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                        QMessageBox.StandardButton.No,
+                    )
+                    if reply != QMessageBox.StandardButton.Yes:
+                        return
+            else:
+                # Mỗi profile có folder riêng — kiểm tra từng profile
+                insufficient = []
+                for p in selected_profiles:
+                    folder = p.get("folder", "")
+                    avail = count_videos_in_folder(folder)
+                    if avail < videos_per_profile:
+                        insufficient.append(
+                            f"  • {p['name']}: cần {videos_per_profile}, có {avail}"
+                        )
+                if insufficient:
+                    details = "\n".join(insufficient)
+                    msg = (
+                        f"⚠️  Một số profile không đủ video:\n\n"
+                        f"{details}\n\n"
+                        f"Bạn có muốn tiếp tục chạy với số video hiện có không?"
+                    )
+                    reply = QMessageBox.question(
+                        self, "Không đủ video",
+                        msg,
+                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                        QMessageBox.StandardButton.No,
+                    )
+                    if reply != QMessageBox.StandardButton.Yes:
+                        return
+
         # ── Caption mode ──────────────────────────────────────────────
         if self._cap_txt_radio.isChecked():
             caption_mode = "txt_file"

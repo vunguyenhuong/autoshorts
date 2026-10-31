@@ -1051,9 +1051,6 @@ class YtSearchTab(QWidget):
             wb.save(path)
             self._result_info_lbl.setText(f"✅  Đã xuất {len(rows)} kênh → Excel!")
             self.log_message.emit(f"[YT Finder] Xuất Excel {len(rows)} kênh → {path}")
-            # Mở file sau khi xuất
-            import subprocess
-            subprocess.Popen(["explorer", path])
         except Exception as e:
             self._result_info_lbl.setText(f"❌  Lỗi: {e}")
 
@@ -1066,15 +1063,13 @@ class YtSearchTab(QWidget):
                 w.writerows(rows)
             self._result_info_lbl.setText(f"✅  Đã xuất {len(rows)} kênh → CSV!")
             self.log_message.emit(f"[YT Finder] Xuất CSV {len(rows)} kênh → {path}")
-            import subprocess
-            subprocess.Popen(["explorer", path])
         except Exception as e:
             self._result_info_lbl.setText(f"❌  Lỗi: {e}")
 
     # ── View in Browser (HTML) ────────────────────────────────────────────
 
     def _view_in_browser(self):
-        """Tạo file HTML đẹp và mở trong trình duyệt mặc định."""
+        """Ghi dữ liệu vào settings/yt_channels.html rồi mở trong trình duyệt."""
         rows = self._get_table_rows()
         if not rows:
             self._result_info_lbl.setText("⚠️  Không có kết quả!")
@@ -1084,31 +1079,28 @@ class YtSearchTab(QWidget):
         country = self._country_cmb.currentText().strip()
         html = self._build_html(rows, keyword, country)
 
-        # Lưu vào file tạm
-        import tempfile
-        tmp = tempfile.NamedTemporaryFile(
-            mode="w", suffix=".html", encoding="utf-8",
-            delete=False, prefix="yt_channels_"
-        )
-        tmp.write(html)
-        tmp.close()
+        # Lưu vào file cố định trong thư mục settings/
+        html_path = os.path.join(os.getcwd(), "settings", "yt_channels.html")
+        os.makedirs(os.path.dirname(html_path), exist_ok=True)
+        with open(html_path, "w", encoding="utf-8") as f:
+            f.write(html)
 
         from core.yt_search import open_url_in_browser
-        open_url_in_browser(tmp.name)
-        self._result_info_lbl.setText("🌐 Đã mở trình duyệt!")
-        self.log_message.emit(f"[YT Finder] Mở HTML trong trình duyệt: {tmp.name}")
+        open_url_in_browser(html_path)
+        self._result_info_lbl.setText(f"🌐 Đã mở trình duyệt! ({len(rows)} kênh)")
+        self.log_message.emit(f"[YT Finder] Mở HTML: {html_path}")
 
     def _build_html(self, rows: list[dict], keyword: str, country: str) -> str:
-        """Tạo nội dung HTML đẹp với tìm kiếm + sort + filter quốc gia + copy."""
+        """Load template từ settings/yt_channels_template.html và inject data vào."""
         import json as _json
-        # Build rows JS data array for rich HTML
+        import re as _re
+
+        # Build JS data array
         js_rows = []
         countries_set = set()
         for i, r in enumerate(rows):
-            sub_raw = r["subs"]  # e.g. "1.2M subs", "45K subs"
-            # Parse sub number for correct numeric sort
+            sub_raw = r["subs"]
             sub_num = 0
-            import re as _re
             m = _re.match(r'([\d.]+)([MKk]?)', sub_raw.replace(',', ''))
             if m:
                 n, unit = float(m.group(1)), m.group(2).upper()
@@ -1125,226 +1117,41 @@ class YtSearchTab(QWidget):
                 "desc": r["desc"],
                 "url": r["url"],
             })
+
+        # Build country filter options
         countries_sorted = sorted(c for c in countries_set if c and c != '—')
         country_options = '<option value="">🌍 Tất cả quốc gia</option>'
         for c in countries_sorted:
             c_esc = c.replace('"', '&quot;')
             country_options += f'<option value="{c_esc}">{c_esc}</option>'
+
         js_data = _json.dumps(js_rows, ensure_ascii=False)
         kw_esc = keyword.replace('<', '&lt;').replace('"', '&quot;')
         country_esc = country.replace('<', '&lt;')
-        n_total = len(rows)
+        n_total = str(len(rows))
 
-        return f"""<!DOCTYPE html>
-<html lang="vi">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>YouTube Channels — {kw_esc}</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-<style>
-* {{ box-sizing: border-box; margin: 0; padding: 0; }}
-body {{ font-family: 'Inter', sans-serif; background: #0F172A; color: #E2E8F0; min-height: 100vh; padding: 24px 32px; }}
-.page-header {{ margin-bottom: 18px; }}
-.page-header h1 {{ font-size: 22px; font-weight: 700; color: #A5B4FC; letter-spacing: -.4px; margin-bottom: 4px; }}
-.page-header .meta {{ color: #64748B; font-size: 12.5px; }}
-.page-header .meta strong {{ color: #C7D2FE; }}
-.toolbar {{
-  display: flex; align-items: center; gap: 10px; margin-bottom: 14px; flex-wrap: wrap;
-  background: #1E293B; border: 1px solid #334155; border-radius: 10px;
-  padding: 10px 14px;
-}}
-#search-box {{
-  flex: 1; min-width: 200px; padding: 8px 13px; font-size: 13px;
-  background: #0F172A; border: 1px solid #334155; border-radius: 7px;
-  color: #E2E8F0; outline: none; font-family: inherit;
-}}
-#search-box:focus {{ border-color: #6366F1; box-shadow: 0 0 0 2px rgba(99,102,241,.25); }}
-#country-filter {{
-  padding: 8px 12px; font-size: 13px;
-  background: #0F172A; border: 1px solid #334155; border-radius: 7px;
-  color: #E2E8F0; font-family: inherit; cursor: pointer; outline: none;
-}}
-#country-filter:focus {{ border-color: #6366F1; }}
-.badge {{ background: #312E81; color: #A5B4FC; padding: 5px 14px;
-  border-radius: 20px; font-size: 12px; font-weight: 700; white-space: nowrap; }}
-.toolbar-btn {{
-  padding: 7px 14px; border-radius: 7px; border: 1px solid #334155;
-  font-size: 12px; font-weight: 600; cursor: pointer; font-family: inherit;
-  background: #1E293B; color: #94A3B8; transition: all .15s; white-space: nowrap;
-}}
-.toolbar-btn:hover {{ background: #334155; color: #E2E8F0; }}
-.toolbar-btn.green {{ background: #064E3B; color: #34D399; border-color: #065F46; }}
-.toolbar-btn.green:hover {{ background: #065F46; }}
-table {{ width: 100%; border-collapse: collapse; font-size: 13px; }}
-thead {{ position: sticky; top: 0; z-index: 10; }}
-th {{
-  background: #1E293B; padding: 11px 14px; font-weight: 600; color: #64748B;
-  text-align: left; border-bottom: 2px solid #334155;
-  cursor: pointer; user-select: none; white-space: nowrap; font-size: 11px;
-  text-transform: uppercase; letter-spacing: .04em;
-}}
-th:hover {{ color: #A5B4FC; }}
-th.sorted-asc::after  {{ content: ' ▲'; font-size: 9px; color: #6366F1; }}
-th.sorted-desc::after {{ content: ' ▼'; font-size: 9px; color: #6366F1; }}
-td {{ padding: 10px 14px; border-bottom: 1px solid rgba(51,65,85,.5); vertical-align: middle; }}
-tr:hover td {{ background: #1A2744; }}
-tr:nth-child(even) td {{ background: rgba(30,41,59,.35); }}
-.num {{ color: #475569; font-size: 12px; text-align: center; width: 36px; }}
-.name-cell .ch-name {{ color: #C7D2FE; font-weight: 600; font-size: 13.5px; }}
-.name-cell .ch-name:hover {{ color: #818CF8; }}
-.name-cell .ch-handle {{ display: block; color: #475569; font-size: 11px; margin-top: 2px; }}
-.center {{ text-align: center; }}
-.country-tag {{
-  display: inline-block; padding: 2px 10px; border-radius: 20px; font-size: 12px;
-  font-weight: 500; background: rgba(5,150,105,.15); color: #34D399; white-space: nowrap;
-}}
-.country-tag.empty {{ background: rgba(71,85,105,.2); color: #475569; }}
-.subs-cell {{ color: #818CF8; font-weight: 700; white-space: nowrap; text-align: center; }}
-.subs-cell.empty {{ color: #334155; }}
-.desc-cell {{ color: #64748B; font-size: 12px; max-width: 300px; line-height: 1.5; }}
-.open-btn {{
-  display: inline-block; padding: 4px 12px; border-radius: 6px; font-size: 12px;
-  font-weight: 600; text-decoration: none; white-space: nowrap;
-  border: 1px solid #0EA5E9; color: #38BDF8; transition: all .15s;
-}}
-.open-btn:hover {{ background: #0EA5E9; color: #fff; }}
-.copy-btn {{
-  display: inline-block; margin-left: 6px; padding: 3px 8px; border-radius: 5px;
-  font-size: 11px; font-weight: 600; cursor: pointer; border: 1px solid #334155;
-  background: transparent; color: #475569; font-family: inherit; transition: all .13s;
-}}
-.copy-btn:hover {{ background: #334155; color: #E2E8F0; }}
-.copy-btn.copied {{ background: #064E3B; color: #34D399; border-color: #065F46; }}
-.hidden {{ display: none !important; }}
-::-webkit-scrollbar {{ width: 6px; height: 6px; }}
-::-webkit-scrollbar-track {{ background: #0F172A; }}
-::-webkit-scrollbar-thumb {{ background: #334155; border-radius: 3px; }}
-</style>
-</head>
-<body>
-<div class="page-header">
-  <h1>🔎 YouTube Channel Finder</h1>
-  <p class="meta">
-    Từ khóa: <strong>{kw_esc}</strong>
-    &nbsp;·&nbsp; Quốc gia: <strong>{country_esc}</strong>
-    &nbsp;·&nbsp; Tìm thấy: <strong style="color:#34D399">{n_total} kênh</strong>
-  </p>
-</div>
-<div class="toolbar">
-  <input id="search-box" type="text" placeholder="🔍 Tìm nhanh: tên kênh, quốc gia, sub..." oninput="applyFilters()">
-  <select id="country-filter" onchange="applyFilters()">{country_options}</select>
-  <span class="badge" id="count-badge">{n_total} kênh</span>
-  <button class="toolbar-btn" onclick="copyAll()">📋 Copy tất cả URL</button>
-  <button class="toolbar-btn green" onclick="exportCSV()">📊 Xuất CSV</button>
-</div>
-<table id="main-table">
-  <thead>
-    <tr>
-      <th onclick="sortTable(0)">#</th>
-      <th onclick="sortTable(1)">Kênh</th>
-      <th onclick="sortTable(2)">🌏 Quốc gia</th>
-      <th onclick="sortTable(3)">Subscribers</th>
-      <th>Mô tả</th>
-      <th>Link</th>
-    </tr>
-  </thead>
-  <tbody id="table-body"></tbody>
-</table>
-<script>
-const ALL_DATA = {js_data};
-let filtered = [...ALL_DATA];
-let sortDir = {{}};
+        # Load template file
+        template_path = os.path.join(os.getcwd(), "settings", "yt_channels_template.html")
+        try:
+            with open(template_path, "r", encoding="utf-8") as f:
+                html = f.read()
+        except FileNotFoundError:
+            # Fallback: trả về HTML tối giản nếu không tìm thấy template
+            return (
+                f"<!DOCTYPE html><html><head><meta charset='UTF-8'><title>YT Channels</title></head>"
+                f"<body><h2>Không tìm thấy template: {template_path}</h2>"
+                f"<p>Vui lòng kiểm tra file settings/yt_channels_template.html</p></body></html>"
+            )
 
-function render() {{
-  const tbody = document.getElementById('table-body');
-  if (!filtered.length) {{
-    tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:40px;color:#475569">Không có kết quả</td></tr>';
-    document.getElementById('count-badge').textContent = '0 kênh';
-    return;
-  }}
-  tbody.innerHTML = filtered.map((r, idx) => {{
-      <td class="desc-cell">${{esc(r.desc)}}</td>
-      <td class="center">
-        <a class="open-btn" href="${{r.url}}" target="_blank">Mở ↗</a>
-        <button class="copy-btn" onclick="copyUrl(this, '${{r.url.replace(/'/g,"\'")}}')">copy</button>
-      </td>
-    </tr>`;
-  }}).join('');
-  document.getElementById('count-badge').textContent = filtered.length + ' kênh';
-}}
+        # Inject data vào placeholders
+        html = html.replace("__DATA_JSON__", js_data)
+        html = html.replace("__KEYWORD__", kw_esc)
+        html = html.replace("__COUNTRY__", country_esc)
+        html = html.replace("__N_TOTAL__", n_total)
+        html = html.replace("__COUNTRY_OPTIONS__", country_options)
+        return html
 
-function esc(s) {{
-  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-}}
-
-function applyFilters() {{
-  const q = document.getElementById('search-box').value.toLowerCase();
-  const ctr = document.getElementById('country-filter').value;
-  filtered = ALL_DATA.filter(r => {{
-    const matchQ = !q || (r.name+r.handle+r.desc+r.url+r.subs+r.country).toLowerCase().includes(q);
-    const matchC = !ctr || r.country === ctr;
-    return matchQ && matchC;
-  }});
-  sortDir = {{}};
-  document.querySelectorAll('th').forEach(th => th.className = '');
-  render();
-}}
-
-function sortTable(col) {{
-  const keys = ['i','name','country','sub_num'];
-  if (col >= keys.length) return;
-  const key = keys[col];
-  const asc = !sortDir[col];
-  sortDir = {{}}; sortDir[col] = asc;
-  document.querySelectorAll('th').forEach((th,i) => {{
-    th.className = i===col ? (asc?'sorted-asc':'sorted-desc') : '';
-  }});
-  filtered.sort((a,b) => {{
-    const va = a[key], vb = b[key];
-    if (typeof va === 'number') return asc ? va-vb : vb-va;
-    return asc ? String(va).localeCompare(String(vb)) : String(vb).localeCompare(String(va));
-  }});
-  render();
-}}
-
-function copyUrl(btn, url) {{
-  navigator.clipboard.writeText(url).then(() => {{
-    btn.textContent = '✓ ok';
-    btn.classList.add('copied');
-    setTimeout(() => {{ btn.textContent = 'copy'; btn.classList.remove('copied'); }}, 1500);
-  }});
-}}
-
-function copyAll() {{
-  const urls = filtered.map(r => r.url).join('\\n');
-  navigator.clipboard.writeText(urls).then(() => {{
-    const btn = event.target;
-    btn.textContent = '✅ Đã copy ' + filtered.length + ' URL!';
-    setTimeout(() => btn.textContent = '📋 Copy tất cả URL', 2000);
-  }});
-}}
-
-function exportCSV() {{
-  const header = ['Tên kênh','Handle','Quốc gia','Subscribers','Mô tả','URL'];
-  const csvRows = [header.map(h => `"${{h}}"`).join(',')];
-  filtered.forEach(r => {{
-    csvRows.push([r.name, r.handle, r.country, r.subs, r.desc, r.url]
-      .map(v => `"${{String(v).replace(/"/g,'""')}}"` ).join(','));
-  }});
-  const blob = new Blob(["\uFEFF" + csvRows.join('\n')], {{type: 'text/csv;charset=utf-8'}});
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = 'youtube_channels.csv';
-  a.click();
-}}
-
-render();
-</script>
-</body>
-</html>"""
-
+    # ── Fullscreen Popup Table ────────────────────────────────────────────
     # ── Fullscreen Popup Table ────────────────────────────────────────────
 
     def _open_fullscreen(self):
@@ -1643,8 +1450,6 @@ class _FullscreenTableDialog(QDialog):
         try:
             wb.save(path)
             self._fs_info_lbl.setText(f"✅ Đã xuất {len(self._channels)} kênh → Excel!")
-            import subprocess
-            subprocess.Popen(["explorer", path])
         except Exception as e:
             self._fs_info_lbl.setText(f"❌ Lỗi: {e}")
 

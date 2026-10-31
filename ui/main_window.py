@@ -14,6 +14,10 @@ from ui.adb_tab import AdbTab
 from ui.tiktok_douyin_tab import TiktokDouyinTab
 from ui.gpm_upload_tab import GpmUploadTab
 from ui.yt_search_tab import YtSearchTab
+from ui.tiktok_checker_tab import TiktokCheckerTab
+from ui.autosub_tab import AutoSubTab
+from ui.capcut_tab import CapCutTab
+from ui.voice_clone_tab import VoiceCloneTab
 from ui.components import SidebarNavButton, TerminalLog
 from core.downloader import YtdlpUpdater
 import ui.theme as theme
@@ -26,10 +30,14 @@ class SidebarWidget(QFrame):
         ("📥", "Downloader"),
         ("✂️",  "Editor"),
         ("🎬", "AutoCut"),
+        ("🎙", "AutoSub"),
+        ("🗣️", "Voice Clone"),
         ("📱", "ADB"),
         ("🎵", "TikTok DL"),
         ("🔎", "YT Finder"),
         ("🚀", "TikTok UP"),
+        ("📊", "TikTok Check"),
+        ("🔄", "CapCut Pre"),
     ]
 
     def __init__(self, on_navigate, parent=None):
@@ -273,12 +281,28 @@ class MainWindow(QMainWindow):
         self.downloader_tab = DownloaderTab()
         self.editor_tab = EditorTab()
         self.autocut_tab = AutoCutTab()
+        self.autosub_tab = AutoSubTab()
         self.adb_tab = AdbTab()
         self.social_dl_tab = TiktokDouyinTab()
         self.yt_search_tab = YtSearchTab()
         self.gpm_upload_tab = GpmUploadTab()
+        self.tiktok_checker_tab = TiktokCheckerTab()
+        self.capcut_tab = CapCutTab()
+        self.voice_clone_tab = VoiceCloneTab()
 
-        for tab in (self.downloader_tab, self.editor_tab, self.autocut_tab, self.adb_tab, self.social_dl_tab, self.yt_search_tab, self.gpm_upload_tab):
+        for tab in (
+            self.downloader_tab,
+            self.editor_tab,
+            self.autocut_tab,
+            self.autosub_tab,
+            self.voice_clone_tab,
+            self.adb_tab,
+            self.social_dl_tab,
+            self.yt_search_tab,
+            self.gpm_upload_tab,
+            self.tiktok_checker_tab,
+            self.capcut_tab
+        ):
             wrapper = QWidget()
             wl = QVBoxLayout(wrapper)
             wl.setContentsMargins(16, 16, 16, 16)
@@ -364,10 +388,14 @@ class MainWindow(QMainWindow):
         self.downloader_tab.log_message.connect(self.append_log)
         self.editor_tab.log_message.connect(self.append_log)
         self.autocut_tab.log_message.connect(self.append_log)
+        self.autosub_tab.log_message.connect(self.append_log)
         self.adb_tab.log_message.connect(self.append_log)
         self.social_dl_tab.log_message.connect(self.append_log)
         self.yt_search_tab.log_message.connect(self.append_log)
         self.gpm_upload_tab.log_message.connect(self.append_log)
+        self.tiktok_checker_tab.log_message.connect(self.append_log)
+        self.capcut_tab.log_message.connect(self.append_log)
+        self.voice_clone_tab.log_message.connect(self.append_log)
 
     # ── Navigation ──────────────────────────────────────────────────────────
 
@@ -384,6 +412,11 @@ class MainWindow(QMainWindow):
         self.sidebar.apply_theme(dark)
         # TerminalLog
         self.log_area.apply_theme(dark)
+        # CapCutTab & VoiceCloneTab
+        if hasattr(self, 'capcut_tab') and hasattr(self.capcut_tab, 'apply_theme'):
+            self.capcut_tab.apply_theme(dark)
+        if hasattr(self, 'voice_clone_tab') and hasattr(self.voice_clone_tab, 'apply_theme'):
+            self.voice_clone_tab.apply_theme(dark)
 
         if dark:
             lc_bg      = "#0A0C12"
@@ -453,7 +486,7 @@ class MainWindow(QMainWindow):
             pass
 
         # Stop các tab worker khác nếu có
-        for tab_name in ('downloader_tab', 'editor_tab', 'autocut_tab', 'adb_tab', 'social_dl_tab', 'yt_search_tab'):
+        for tab_name in ('downloader_tab', 'editor_tab', 'autocut_tab', 'autosub_tab', 'voice_clone_tab', 'adb_tab', 'social_dl_tab', 'yt_search_tab', 'tiktok_checker_tab', 'capcut_tab'):
             try:
                 tab = getattr(self, tab_name, None)
                 if tab is None:

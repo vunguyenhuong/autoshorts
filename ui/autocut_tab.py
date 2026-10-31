@@ -21,7 +21,16 @@ from PIL import Image
 # Import from core module
 from core.autocut_processor import (VideoProcessThread, SkipRangeWidget, 
                                    detect_gpu_encoder, FFMPEG_EXE, FFPROBE_EXE,
-                                   run_ffmpeg_silent, EXE_DIR)
+                                   run_ffmpeg_silent, EXE_DIR,
+                                   detect_scene_cuts, get_scene_skip_ranges,
+                                   SceneAnalysisThread, build_scene_split_log_details,
+                                   VideoDownloaderThread, ThumbnailDownloaderThread,
+                                   prepare_thumbnail_portrait,
+                                   create_thumbnail_with_part_overlay,
+                                   fetch_or_extract_thumbnail)
+from core.subtitle_processor import (SubtitleConfig, SubtitleGeneratorThread)
+
+
 
 class PreviewPopup(QWidget):
     """Popup window để hiển thị preview ở kích thước lớn hơn"""
@@ -373,6 +382,46 @@ class VideoItemWidget(QFrame):
             self.stats_label.hide()
 
 
+class DraggablePreviewLabel(QLabel):
+    """
+    Subclass of QLabel that allows interactive dragging to adjust Subtitle Margin Bottom (px).
+    """
+    position_changed = pyqtSignal(int)  # Emits margin_v (px from bottom)
+
+    def __init__(self, text="", parent=None):
+        super().__init__(text, parent)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.is_dragging = False
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.is_dragging = True
+            self._update_margin_from_event(event)
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self.is_dragging:
+            self._update_margin_from_event(event)
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.is_dragging = False
+        super().mouseReleaseEvent(event)
+
+    def _update_margin_from_event(self, event):
+        h = self.height()
+        if h <= 0:
+            return
+        mouse_y = event.position().y()
+        # Map label mouse Y (0..h) to video canvas Y (0..1920)
+        video_y = (mouse_y / float(h)) * 1920.0
+        # Margin from bottom: 1920 - video_y
+        margin_v = int(round(1920.0 - video_y))
+        margin_v = max(0, min(1920, margin_v))
+        self.position_changed.emit(margin_v)
+
+
 class AutoCutTab(QWidget):
     """AutoCut Video Editor Tab"""
     log_message = pyqtSignal(str)
@@ -403,12 +452,16 @@ class AutoCutTab(QWidget):
         self.preview_timer.setSingleShot(True)
         self.preview_timer.timeout.connect(self.update_preview)
 
-        # Subtitle variables (UI is currently hidden/overwritten)
-        self.enable_subtitles = False
+        # Subtitle variables (Auto Subtitle feature)
+        self.subtitle_config = SubtitleConfig()  # All subtitle settings
+        self._subtitle_threads = {}    # video_path -> SubtitleGeneratorThread
+        self._pending_subtitle_files = {}  # video_path -> ass_file_path (ready to use)
+        self._subtitle_color = (255, 255, 255)      # White (display in color picker)
+        self._subtitle_hl_color = (255, 255, 0)     # Yellow highlight (display)
         self.is_generating_subtitles = False
         self.subtitle_generator = None
-        self.subtitle_font_size = 40
-        self.subtitle_border_width = 2
+        self.subtitle_font_size = 72
+        self.subtitle_border_width = 3
         self.subtitle_color = (255, 255, 255)
         self.subtitle_bg_color = (0, 0, 0, 150)
         self.current_srt_file = None
@@ -419,6 +472,12 @@ class AutoCutTab(QWidget):
         self.current_queue_index = 0
         self.total_queue_size = 0
         self.current_processing_video = None
+
+        # Thumbnail background variables
+        self.source_thumbnail_path = ""   # Path thumbnail gốc (từ URL hoặc manual)
+        self.use_video_thumbnail = False  # Bật/tắt dùng thumbnail làm nền
+        self._downloader_thread = None    # VideoDownloaderThread reference
+        self._thumb_downloader_thread = None  # ThumbnailDownloaderThread reference
 
         # Setup UI
         self.setup_ui()
@@ -572,6 +631,7 @@ class AutoCutTab(QWidget):
         self.mode_combo = QComboBox()
         self.mode_combo.addItem("Xử lý 1 Video đơn lẻ", "single")
         self.mode_combo.addItem("Xử lý Hàng loạt (Thư mục)", "batch")
+        self.mode_combo.addItem("🌐 Xử lý từ URL (YouTube / TikTok...)", "url")
         self.mode_combo.currentIndexChanged.connect(self.update_processing_mode)
         layout.addRow("Chế độ:", self.mode_combo)
 
@@ -635,6 +695,93 @@ class AutoCutTab(QWidget):
 
         batch_folder_layout.addStretch()
         layout.addRow("Output (Batch):", self.batch_folder_container)
+
+        # URL download section — chỉ hiện khi mode == 'url'
+        self.url_section_container = QWidget()
+        url_section_layout = QFormLayout(self.url_section_container)
+        url_section_layout.setContentsMargins(0, 0, 0, 0)
+        url_section_layout.setSpacing(6)
+
+        url_widget = QWidget()
+        url_layout = QHBoxLayout(url_widget)
+        url_layout.setContentsMargins(0, 0, 0, 0)
+        url_layout.setSpacing(5)
+
+        self.url_input = QLineEdit()
+        self.url_input.setPlaceholderText("Dán link YouTube / TikTok / Facebook...")
+        self.url_input.setToolTip("Dán link video vào đây và nhấn 'Tải' để tự động tải về")
+        url_layout.addWidget(self.url_input, 4)
+
+        self.download_btn = QPushButton("⬇️ Tải")
+        self.download_btn.setObjectName("downloadButton")
+        self.download_btn.setToolTip("Tải video từ URL về thư mục xuất")
+        self.download_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #7C3AED;
+                color: white;
+                border: none;
+                border-radius: 6px;
+                padding: 5px 12px;
+                font-weight: 700;
+                font-size: 12px;
+                min-width: 70px;
+            }
+            QPushButton:hover { background-color: #6D28D9; }
+            QPushButton:pressed { background-color: #5B21B6; }
+            QPushButton:disabled { background-color: #9CA3AF; }
+        """)
+        self.download_btn.clicked.connect(self.download_from_url)
+        url_layout.addWidget(self.download_btn, 1)
+
+        self.cancel_download_btn = QPushButton("✕")
+        self.cancel_download_btn.setToolTip("Huỷ tải")
+        self.cancel_download_btn.setVisible(False)
+        self.cancel_download_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #DC2626;
+                color: white;
+                border: none;
+                border-radius: 6px;
+                padding: 5px 10px;
+                font-weight: 700;
+                font-size: 12px;
+                min-width: 32px;
+            }
+            QPushButton:hover { background-color: #B91C1C; }
+        """)
+        self.cancel_download_btn.clicked.connect(self.cancel_download)
+        url_layout.addWidget(self.cancel_download_btn)
+
+        url_section_layout.addRow("URL:", url_widget)
+
+        layout.addRow("", self.url_section_container)
+        self.url_section_container.setVisible(False)  # Ẩn theo mặc định
+
+        # Thumbnail Section — Hiển thị ô nhập URL + Nút Lấy Thumb vật lý
+        self.thumb_section_container = QWidget()
+        thumb_section_layout = QHBoxLayout(self.thumb_section_container)
+        thumb_section_layout.setContentsMargins(0, 2, 0, 2)
+        thumb_section_layout.setSpacing(6)
+
+        self.thumb_url_input = QLineEdit()
+        self.thumb_url_input.setPlaceholderText("Link video/ảnh lấy thumb (để trống tự lấy frame đầu)...")
+        self.thumb_url_input.setToolTip(
+            "Dán link YouTube / TikTok / Facebook hoặc link ảnh trực tiếp vào đây để lấy thumbnail làm ảnh bìa.\n"
+            "Nếu để trống, hệ thống sẽ tự động trích xuất frame đầu tiên của video làm ảnh bìa."
+        )
+        thumb_section_layout.addWidget(self.thumb_url_input)
+
+        self.fetch_thumb_btn = QPushButton("🖼️ Get Thumb")
+        self.fetch_thumb_btn.setToolTip("Nhấn để thử tải/trích xuất thumbnail ngay lập tức")
+        self.fetch_thumb_btn.clicked.connect(self.on_fetch_thumb_clicked)
+        thumb_section_layout.addWidget(self.fetch_thumb_btn)
+
+        layout.addRow("Thumbnail:", self.thumb_section_container)
+
+        self.thumb_status_label = QLabel("ℹ️ Để trống = tự lấy frame đầu video")
+        self.thumb_status_label.setStyleSheet("color: #9CA3AF; font-size: 10px; font-style: italic;")
+        self.thumb_status_label.setWordWrap(True)
+        layout.addRow("", self.thumb_status_label)
 
         # Title Y position
         self.title_y_input = QSpinBox()
@@ -770,6 +917,448 @@ class AutoCutTab(QWidget):
         part_layout.addWidget(self.part_details_container)
 
         layout.addRow("Cấu hình Part:", part_group)
+
+        # ── SCENE SPLIT ─────────────────────────────────────────────────────
+        scene_sep = QLabel("\u2702 T\u00e1ch C\u1ea3nh (Scene Split):")
+        scene_sep.setStyleSheet(
+            "font-weight: 700; color: #a78bfa; font-size: 11px; "
+            "margin-top: 6px; background: transparent; border: none;"
+        )
+        layout.addRow(scene_sep)
+
+        scene_outer = QWidget()
+        scene_outer_layout = QVBoxLayout(scene_outer)
+        scene_outer_layout.setContentsMargins(0, 0, 0, 0)
+        scene_outer_layout.setSpacing(6)
+
+        # Checkbox enable
+        self.scene_split_checkbox = QCheckBox("K\u00edch ho\u1ea1t t\u00e1ch c\u1ea3nh t\u1ef1 \u0111\u1ed9ng")
+        self.scene_split_checkbox.setChecked(False)
+        self.scene_split_checkbox.setToolTip(
+            "Dùng engine phân tích cảnh đa phương pháp.\n"
+            "Sau đó xóa ngẫu nhiên N% số cảnh tìm được."
+        )
+        scene_outer_layout.addWidget(self.scene_split_checkbox)
+
+        # Detail container (hidden when unchecked)
+        self.scene_split_details = QWidget()
+        scene_detail_layout = QFormLayout(self.scene_split_details)
+        scene_detail_layout.setContentsMargins(10, 0, 0, 0)
+        scene_detail_layout.setSpacing(6)
+        scene_detail_layout.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+
+        # ── Method selector ──
+        self.scene_method_combo = QComboBox()
+        self.scene_method_combo.addItem("Hybrid  (Histogram + SSIM + Adaptive)", "hybrid")
+        self.scene_method_combo.addItem("Histogram  (nhanh, phù hợp video phim)", "histogram")
+        self.scene_method_combo.addItem("SSIM  (chính xác hơn, chậm hơn)", "ssim")
+        self.scene_method_combo.addItem("FFmpeg scdet  (không cần OpenCV)", "ffmpeg")
+        self.scene_method_combo.addItem("PySceneDetect  (ContentDetector)", "pyscene")
+        self.scene_method_combo.setToolTip(
+            "Chọn thuật toán phát hiện cảnh:\n"
+            "• Hybrid   – Kết hợp Histogram + SSIM + Adaptive Threshold (khuyên dùng)\n"
+            "• Histogram – So sánh histogram màu HSV giữa các frame\n"
+            "• SSIM     – So sánh cấu trúc ảnh (Structural Similarity)\n"
+            "• FFmpeg   – Dùng filter scdet của FFmpeg (fallback khi thiếu OpenCV)\n"
+            "• PySceneDetect – ContentDetector của thư viện scenedetect"
+        )
+        self.scene_method_combo.currentIndexChanged.connect(self._on_scene_method_changed)
+        scene_detail_layout.addRow("Ph\u01b0\u01a1ng ph\u00e1p:", self.scene_method_combo)
+
+        # ── Threshold / Sensitivity ──
+        self.scene_threshold_label_item = QLabel("Adaptive K (1\u20134):")
+        self.scene_threshold_input = QDoubleSpinBox()
+        self.scene_threshold_input.setRange(1.0, 4.0)
+        self.scene_threshold_input.setValue(2.0)
+        self.scene_threshold_input.setSingleStep(0.1)
+        self.scene_threshold_input.setDecimals(1)
+        self.scene_threshold_input.setToolTip(
+            "Hybrid/Histogram/SSIM: Adaptive K — threshold = mean + K×std\n"
+            "Cao = ít cảnh hơn (chỉ cắt mạnh), thấp = nhiều cảnh hơn.\n"
+            "Khuyên: 1.5–2.5"
+        )
+        self.scene_threshold_input.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        scene_detail_layout.addRow(self.scene_threshold_label_item, self.scene_threshold_input)
+
+        # ── Delete percent ──
+        self.scene_delete_pct_input = QSpinBox()
+        self.scene_delete_pct_input.setRange(0, 90)
+        self.scene_delete_pct_input.setValue(30)
+        self.scene_delete_pct_input.setSuffix("%")
+        self.scene_delete_pct_input.setSingleStep(5)
+        self.scene_delete_pct_input.setToolTip(
+            "X\u00f3a ng\u1eabu nhi\u00ean bao nhi\u00eau % s\u1ed1 c\u1ea3nh t\u00ecm \u0111\u01b0\u1ee3c.\n"
+            "0% = kh\u00f4ng x\u00f3a c\u1ea3nh n\u00e0o. 90% = x\u00f3a h\u1ea7u h\u1ebft."
+        )
+        self.scene_delete_pct_input.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        scene_detail_layout.addRow("X\u00f3a ng\u1eabu nhi\u00ean:", self.scene_delete_pct_input)
+
+        # ── Min scene duration ──
+        self.scene_min_dur_input = QDoubleSpinBox()
+        self.scene_min_dur_input.setRange(0.1, 60.0)
+        self.scene_min_dur_input.setValue(1.5)
+        self.scene_min_dur_input.setSuffix("s")
+        self.scene_min_dur_input.setSingleStep(0.5)
+        self.scene_min_dur_input.setDecimals(1)
+        self.scene_min_dur_input.setToolTip(
+            "C\u1ea3nh ng\u1eafn h\u01a1n gi\u00e1 tr\u1ecb n\u00e0y s\u1ebd KH\u00d4NG b\u1ecb x\u00f3a.\n"
+            "Gi\u00fap tr\u00e1nh m\u1ea5t c\u00e1c c\u1ea3nh qu\u00e1 ng\u1eafn."
+        )
+        self.scene_min_dur_input.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        scene_detail_layout.addRow("Th\u1eddi l\u01b0\u1ee3ng t\u1ed1i thi\u1ec3u:", self.scene_min_dur_input)
+
+        # ── Analyze button + status ──
+        analyze_row = QWidget()
+        analyze_row_layout = QHBoxLayout(analyze_row)
+        analyze_row_layout.setContentsMargins(0, 0, 0, 0)
+        analyze_row_layout.setSpacing(8)
+
+        self.scene_analyze_btn = QPushButton("\U0001f3ac Ph\u00e2n t\u00edch c\u1ea3nh")
+        self.scene_analyze_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.scene_analyze_btn.setToolTip(
+            "Ch\u1ea1y ph\u00e2n t\u00edch c\u1ea3nh tr\u00ean video \u0111\u1ea7u ti\u00ean \u0111\u1ec3 xem tr\u01b0\u1edbc k\u1ebft qu\u1ea3.\n"
+            "K\u1ebft qu\u1ea3 s\u1ebd \u0111\u01b0\u1ee3c d\u00f9ng khi nh\u1ea5n Start Processing."
+        )
+        self.scene_analyze_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #7c3aed;
+                color: white;
+                border: none;
+                border-radius: 6px;
+                padding: 5px 12px;
+                font-weight: 600;
+                font-size: 11px;
+            }
+            QPushButton:hover { background-color: #6d28d9; }
+            QPushButton:disabled { background-color: #4b5563; color: #9ca3af; }
+        """)
+        self.scene_analyze_btn.clicked.connect(self.run_scene_analysis_preview)
+        analyze_row_layout.addWidget(self.scene_analyze_btn)
+        analyze_row_layout.addStretch()
+        scene_detail_layout.addRow("", analyze_row)
+
+        self.scene_status_label = QLabel("Ch\u01b0a ph\u00e2n t\u00edch")
+        self.scene_status_label.setStyleSheet(
+            "color: #6b7280; font-size: 10px; font-style: italic; "
+            "background: transparent; border: none;"
+        )
+        self.scene_status_label.setWordWrap(True)
+        scene_detail_layout.addRow("", self.scene_status_label)
+
+        scene_outer_layout.addWidget(self.scene_split_details)
+        self.scene_split_details.setVisible(False)
+        self.scene_split_checkbox.toggled.connect(self.scene_split_details.setVisible)
+
+        layout.addRow("", scene_outer)
+        # ── END SCENE SPLIT ──────────────────────────────────────────────────
+
+        # ── TRANSITION / FADE ───────────────────────────────────────────────
+        trans_sep = QLabel("✨ Hiệu ứng chuyển cảnh (Transitions):")
+        trans_sep.setStyleSheet(
+            "font-weight: 700; color: #38bdf8; font-size: 11px; "
+            "margin-top: 6px; background: transparent; border: none;"
+        )
+        layout.addRow(trans_sep)
+
+        trans_outer = QWidget()
+        trans_outer_layout = QVBoxLayout(trans_outer)
+        trans_outer_layout.setContentsMargins(0, 0, 0, 0)
+        trans_outer_layout.setSpacing(6)
+
+        self.fade_transition_checkbox = QCheckBox("Hiệu ứng mượt chuyển cảnh (Fade In/Out)")
+        self.fade_transition_checkbox.setChecked(True)
+        self.fade_transition_checkbox.setToolTip(
+            "Tự động mờ dần hình ảnh và âm thanh (Fade In / Fade Out) khi nối các cảnh,\n"
+            "giúp các đoạn cắt cảnh mượt mà tự nhiên, không bị giật hay gắt."
+        )
+        trans_outer_layout.addWidget(self.fade_transition_checkbox)
+
+        self.fade_details_container = QWidget()
+        fade_detail_layout = QFormLayout(self.fade_details_container)
+        fade_detail_layout.setContentsMargins(10, 0, 0, 0)
+        fade_detail_layout.setSpacing(6)
+
+        self.fade_duration_input = QDoubleSpinBox()
+        self.fade_duration_input.setRange(0.1, 2.0)
+        self.fade_duration_input.setValue(0.3)
+        self.fade_duration_input.setSingleStep(0.1)
+        self.fade_duration_input.setDecimals(1)
+        self.fade_duration_input.setSuffix(" giây")
+        self.fade_duration_input.setToolTip("Thời lượng làm mượt (Fade) đầu và cuối mỗi cảnh (Khuyên dùng: 0.2s - 0.5s).")
+        self.fade_duration_input.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        fade_detail_layout.addRow("Thời lượng Fade:", self.fade_duration_input)
+
+        trans_outer_layout.addWidget(self.fade_details_container)
+        self.fade_transition_checkbox.toggled.connect(self.fade_details_container.setVisible)
+
+        layout.addRow("", trans_outer)
+        # ── END TRANSITION ──────────────────────────────────────────────────
+
+        # ── AUTO SUBTITLE ────────────────────────────────────────────────────
+        sub_sep = QLabel("🎙 Auto Subtitle (Phụ đề tự động):")
+        sub_sep.setStyleSheet(
+            "font-weight: 700; color: #f59e0b; font-size: 11px; "
+            "margin-top: 6px; background: transparent; border: none;"
+        )
+        layout.addRow(sub_sep)
+
+        sub_outer = QWidget()
+        sub_outer_layout = QVBoxLayout(sub_outer)
+        sub_outer_layout.setContentsMargins(0, 0, 0, 0)
+        sub_outer_layout.setSpacing(6)
+
+        # Enable checkbox
+        self.subtitle_enable_checkbox = QCheckBox("Kích hoạt Auto Subtitle (faster-whisper)")
+        self.subtitle_enable_checkbox.setChecked(False)
+        self.subtitle_enable_checkbox.setToolTip(
+            "Tự động nhận diện giọng nói và tạo phụ đề đồng bộ.\n"
+            "Yêu cầu: pip install faster-whisper\n"
+            "Tự phát hiện ngôn ngữ (tiếng Việt, Anh, …)."
+        )
+        sub_outer_layout.addWidget(self.subtitle_enable_checkbox)
+
+        # Detail container (collapsed when disabled)
+        self.subtitle_details = QWidget()
+        sub_detail_layout = QFormLayout(self.subtitle_details)
+        sub_detail_layout.setContentsMargins(10, 0, 0, 0)
+        sub_detail_layout.setSpacing(6)
+        sub_detail_layout.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+
+        # Whisper model
+        self.subtitle_model_combo = QComboBox()
+        self.subtitle_model_combo.addItem("tiny  (nhanh nhất, kém chính xác)", "tiny")
+        self.subtitle_model_combo.addItem("base  (cân bằng – khuyên dùng)", "base")
+        self.subtitle_model_combo.addItem("small  (tốt hơn, chậm hơn)", "small")
+        self.subtitle_model_combo.addItem("medium  (chính xác cao)", "medium")
+        self.subtitle_model_combo.addItem("large-v3-turbo  (cực chuẩn + nhanh)", "large-v3-turbo")
+        self.subtitle_model_combo.addItem("large-v3  (chính xác nhất, rất chậm)", "large-v3")
+        self.subtitle_model_combo.setCurrentIndex(1)  # base
+        self.subtitle_model_combo.setToolTip(
+            "Model Whisper nhỏ hơn = nhanh hơn nhưng kém chính xác hơn.\n"
+            "Khuyên dùng: base (đủ tốt cho tiếng Việt/Anh) hoặc large-v3-turbo."
+        )
+        sub_detail_layout.addRow("Whisper Model:", self.subtitle_model_combo)
+
+        # Beam Search size
+        beam_widget = QWidget()
+        beam_row = QHBoxLayout(beam_widget)
+        beam_row.setContentsMargins(0, 0, 0, 0)
+        beam_row.setSpacing(6)
+        self.subtitle_beam_size_spin = QSpinBox()
+        self.subtitle_beam_size_spin.setRange(1, 10)
+        self.subtitle_beam_size_spin.setValue(5)
+        self.subtitle_beam_size_spin.setToolTip(
+            "1 = Greedy search (nhanh hơn)\n"
+            "5 = Beam Search (mặc định, chính xác hơn gấp nhiều lần)"
+        )
+        self.subtitle_beam_size_spin.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        beam_row.addWidget(self.subtitle_beam_size_spin)
+        sub_detail_layout.addRow("Beam Search:", beam_widget)
+
+        # Context Prompt
+        self.subtitle_initial_prompt_input = QLineEdit()
+        self.subtitle_initial_prompt_input.setPlaceholderText("Ví dụ: Tiếng Việt chuẩn, tên riêng, từ vựng công nghệ...")
+        self.subtitle_initial_prompt_input.setToolTip(
+            "Cung cấp ngữ cảnh gợi ý cho Whisper AI (tên riêng, dấu câu, từ chuyên ngành)\n"
+            "để AI ưu tiên nhận diện chuẩn xác nhất."
+        )
+        sub_detail_layout.addRow("Context Prompt:", self.subtitle_initial_prompt_input)
+
+        # Font settings row
+        sub_font_widget = QWidget()
+        sub_font_layout = QHBoxLayout(sub_font_widget)
+        sub_font_layout.setContentsMargins(0, 0, 0, 0)
+        sub_font_layout.setSpacing(6)
+
+        self.subtitle_font_name_input = QLineEdit()
+        self.subtitle_font_name_input.setText("Arial")
+        self.subtitle_font_name_input.setPlaceholderText("Font hỗ trợ Unicode...")
+        self.subtitle_font_name_input.setToolTip(
+            "Tên font hỗ trợ Unicode và tiếng Việt.\n"
+            "Ví dụ: Arial, Oswald-Bold, Be Vietnam Pro\n"
+            "Font phải được cài trong hệ thống hoặc trong thư mục fonts/."
+        )
+        sub_font_layout.addWidget(self.subtitle_font_name_input, 2)
+
+        sub_font_layout.addWidget(QLabel("Size:"))
+        self.subtitle_font_size_input = QSpinBox()
+        self.subtitle_font_size_input.setRange(20, 200)
+        self.subtitle_font_size_input.setValue(72)
+        self.subtitle_font_size_input.setSuffix("pt")
+        self.subtitle_font_size_input.setToolTip("Cỡ chữ subtitle. Khuyên dùng: 60-80 cho video 1080×1920.")
+        self.subtitle_font_size_input.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        sub_font_layout.addWidget(self.subtitle_font_size_input)
+        sub_detail_layout.addRow("Font:", sub_font_widget)
+
+        # Colors row
+        sub_color_widget = QWidget()
+        sub_color_layout = QHBoxLayout(sub_color_widget)
+        sub_color_layout.setContentsMargins(0, 0, 0, 0)
+        sub_color_layout.setSpacing(6)
+
+        # Text color
+        sub_color_layout.addWidget(QLabel("Chữ:"))
+        self.subtitle_color_preview = QLabel()
+        self.subtitle_color_preview.setFixedSize(24, 24)
+        self.subtitle_color_preview.setStyleSheet(
+            f"background-color: rgb{self._subtitle_color}; border: 1px solid #555; border-radius: 3px;"
+        )
+        sub_color_layout.addWidget(self.subtitle_color_preview)
+        sub_color_btn = QPushButton("⚙️")
+        sub_color_btn.setObjectName("colorButton")
+        sub_color_btn.setFixedWidth(32)
+        sub_color_btn.clicked.connect(self._pick_subtitle_color)
+        sub_color_layout.addWidget(sub_color_btn)
+
+        # Highlight color
+        sub_color_layout.addWidget(QLabel("Highlight:"))
+        self.subtitle_hl_color_preview = QLabel()
+        self.subtitle_hl_color_preview.setFixedSize(24, 24)
+        self.subtitle_hl_color_preview.setStyleSheet(
+            f"background-color: rgb{self._subtitle_hl_color}; border: 1px solid #555; border-radius: 3px;"
+        )
+        sub_color_layout.addWidget(self.subtitle_hl_color_preview)
+        sub_hl_btn = QPushButton("⚙️")
+        sub_hl_btn.setObjectName("colorButton")
+        sub_hl_btn.setFixedWidth(32)
+        sub_hl_btn.clicked.connect(self._pick_subtitle_hl_color)
+        sub_color_layout.addWidget(sub_hl_btn)
+        sub_color_layout.addStretch()
+        sub_detail_layout.addRow("Màu sắc:", sub_color_widget)
+
+        # Outline / Shadow / Margin
+        sub_style_widget = QWidget()
+        sub_style_layout = QHBoxLayout(sub_style_widget)
+        sub_style_layout.setContentsMargins(0, 0, 0, 0)
+        sub_style_layout.setSpacing(6)
+
+        sub_style_layout.addWidget(QLabel("Outline:"))
+        self.subtitle_outline_input = QDoubleSpinBox()
+        self.subtitle_outline_input.setRange(0.0, 10.0)
+        self.subtitle_outline_input.setValue(3.0)
+        self.subtitle_outline_input.setSingleStep(0.5)
+        self.subtitle_outline_input.setDecimals(1)
+        self.subtitle_outline_input.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        sub_style_layout.addWidget(self.subtitle_outline_input)
+
+        sub_style_layout.addWidget(QLabel("Shadow:"))
+        self.subtitle_shadow_input = QDoubleSpinBox()
+        self.subtitle_shadow_input.setRange(0.0, 10.0)
+        self.subtitle_shadow_input.setValue(2.0)
+        self.subtitle_shadow_input.setSingleStep(0.5)
+        self.subtitle_shadow_input.setDecimals(1)
+        self.subtitle_shadow_input.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        sub_style_layout.addWidget(self.subtitle_shadow_input)
+
+        sub_style_layout.addWidget(QLabel("Margin ↑:"))
+        self.subtitle_margin_input = QSpinBox()
+        self.subtitle_margin_input.setRange(0, 1920)
+        self.subtitle_margin_input.setValue(120)
+        self.subtitle_margin_input.setSuffix("px")
+        self.subtitle_margin_input.setToolTip("Khoảng cách từ mép dưới màn hình (0 - 1920px). Tùy chỉnh vị trí phụ đề từ đáy lên đỉnh video.")
+        self.subtitle_margin_input.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        sub_style_layout.addWidget(self.subtitle_margin_input)
+        sub_detail_layout.addRow("Style:", sub_style_widget)
+
+        # Word highlight checkbox
+        self.subtitle_word_hl_checkbox = QCheckBox("Word-level Highlight (từng từ đổi màu khi nói)")
+        self.subtitle_word_hl_checkbox.setChecked(False)
+        self.subtitle_word_hl_checkbox.setToolTip(
+            "Từ đang được nói sẽ đổi màu sang màu Highlight.\n"
+            "Yêu cầu FFmpeg được build với libass.\n"
+            "Mặc định: TẮT (an toàn hơn cho mọi FFmpeg build)."
+        )
+        sub_detail_layout.addRow("", self.subtitle_word_hl_checkbox)
+
+        # Max chars per line
+        self.subtitle_max_chars_input = QSpinBox()
+        self.subtitle_max_chars_input.setRange(10, 80)
+        self.subtitle_max_chars_input.setValue(40)
+        self.subtitle_max_chars_input.setToolTip(
+            "Số ký tự tối đa trên mỗi dòng trước khi xuống dòng.\n"
+            "Khuyên dùng: 35-45 cho video dọc 1080p."
+        )
+        self.subtitle_max_chars_input.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        sub_detail_layout.addRow("Max ký tự/dòng:", self.subtitle_max_chars_input)
+
+        # Max words per block
+        self.subtitle_max_words_input = QSpinBox()
+        self.subtitle_max_words_input.setRange(1, 30)
+        self.subtitle_max_words_input.setValue(5)
+        self.subtitle_max_words_input.setToolTip(
+            "Số từ tối đa hiển thị trong 1 cụm subtitle.\n"
+            "Khuyên dùng: 4-6 từ để câu thoại xuất hiện ngắn gọn, nhịp nhanh chuẩn TikTok/Shorts."
+        )
+        self.subtitle_max_words_input.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        sub_detail_layout.addRow("Max từ/cụm:", self.subtitle_max_words_input)
+
+        # Max lines per block
+        self.subtitle_max_lines_input = QSpinBox()
+        self.subtitle_max_lines_input.setRange(1, 3)
+        self.subtitle_max_lines_input.setValue(1)
+        self.subtitle_max_lines_input.setToolTip(
+            "Số dòng tối đa hiển thị trong 1 cụm subtitle (Mặc định: 1 dòng)."
+        )
+        self.subtitle_max_lines_input.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        sub_detail_layout.addRow("Max dòng/cụm:", self.subtitle_max_lines_input)
+
+        # Test subtitle button
+        sub_test_row = QWidget()
+        sub_test_layout = QHBoxLayout(sub_test_row)
+        sub_test_layout.setContentsMargins(0, 0, 0, 0)
+        sub_test_layout.setSpacing(8)
+
+        self.subtitle_test_btn = QPushButton("🔍 Test Subtitle (video đầu)")
+        self.subtitle_test_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.subtitle_test_btn.setToolTip(
+            "Chạy thử nhận diện giọng nói trên video đầu tiên.\n"
+            "File ASS sẽ được tạo trong thư mục xuất/subtitles/.\n"
+            "Không tạo video, chỉ kiểm tra kết quả subtitle."
+        )
+        self.subtitle_test_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #d97706;
+                color: white;
+                border: none;
+                border-radius: 6px;
+                padding: 5px 12px;
+                font-weight: 600;
+                font-size: 11px;
+            }
+            QPushButton:hover { background-color: #b45309; }
+            QPushButton:disabled { background-color: #4b5563; color: #9ca3af; }
+        """)
+        self.subtitle_test_btn.clicked.connect(self._run_subtitle_test)
+        sub_test_layout.addWidget(self.subtitle_test_btn)
+        sub_test_layout.addStretch()
+        sub_detail_layout.addRow("", sub_test_row)
+
+        # Status label
+        self.subtitle_status_label = QLabel("Chưa tạo subtitle")
+        self.subtitle_status_label.setStyleSheet(
+            "color: #6b7280; font-size: 10px; font-style: italic; "
+            "background: transparent; border: none;"
+        )
+        self.subtitle_status_label.setWordWrap(True)
+        sub_detail_layout.addRow("", self.subtitle_status_label)
+
+        self.subtitle_details.setLayout(sub_detail_layout)
+        sub_outer_layout.addWidget(self.subtitle_details)
+        self.subtitle_details.setVisible(False)
+        self.subtitle_enable_checkbox.toggled.connect(self.subtitle_details.setVisible)
+        self.subtitle_enable_checkbox.toggled.connect(self._on_subtitle_toggled)
+        self.subtitle_enable_checkbox.toggled.connect(self.update_preview_debounced)
+        self.subtitle_font_name_input.textChanged.connect(self.update_preview_debounced)
+        self.subtitle_font_size_input.valueChanged.connect(self.update_preview_debounced)
+        self.subtitle_outline_input.valueChanged.connect(self.update_preview_debounced)
+        self.subtitle_shadow_input.valueChanged.connect(self.update_preview_debounced)
+        self.subtitle_margin_input.valueChanged.connect(self.update_preview_debounced)
+        self.subtitle_max_chars_input.valueChanged.connect(self.update_preview_debounced)
+        self.subtitle_max_words_input.valueChanged.connect(self.update_preview_debounced)
+        self.subtitle_max_lines_input.valueChanged.connect(self.update_preview_debounced)
+
+        layout.addRow("", sub_outer)
+        # ── END AUTO SUBTITLE ────────────────────────────────────────────────
 
         # GPU - with auto-detection
         gpu_widget = QWidget()
@@ -1092,6 +1681,22 @@ class AutoCutTab(QWidget):
             "height_scale": self.height_scale_input.value(),
             # Font
             "font_index": self.font_combo.currentIndex(),
+            # Auto Subtitle
+            "subtitle_enabled": self.subtitle_enable_checkbox.isChecked() if hasattr(self, 'subtitle_enable_checkbox') else False,
+            "subtitle_model": self.subtitle_model_combo.currentData() if hasattr(self, 'subtitle_model_combo') else "base",
+            "subtitle_beam_size": self.subtitle_beam_size_spin.value() if hasattr(self, 'subtitle_beam_size_spin') else 5,
+            "subtitle_initial_prompt": self.subtitle_initial_prompt_input.text() if hasattr(self, 'subtitle_initial_prompt_input') else "",
+            "subtitle_font_name": self.subtitle_font_name_input.text() if hasattr(self, 'subtitle_font_name_input') else "Arial",
+            "subtitle_font_size": self.subtitle_font_size_input.value() if hasattr(self, 'subtitle_font_size_input') else 72,
+            "subtitle_outline": self.subtitle_outline_input.value() if hasattr(self, 'subtitle_outline_input') else 3.0,
+            "subtitle_shadow": self.subtitle_shadow_input.value() if hasattr(self, 'subtitle_shadow_input') else 2.0,
+            "subtitle_margin_v": self.subtitle_margin_input.value() if hasattr(self, 'subtitle_margin_input') else 120,
+            "subtitle_max_chars": self.subtitle_max_chars_input.value() if hasattr(self, 'subtitle_max_chars_input') else 40,
+            "subtitle_max_words": self.subtitle_max_words_input.value() if hasattr(self, 'subtitle_max_words_input') else 5,
+            "subtitle_max_lines": self.subtitle_max_lines_input.value() if hasattr(self, 'subtitle_max_lines_input') else 1,
+            "subtitle_word_hl": self.subtitle_word_hl_checkbox.isChecked() if hasattr(self, 'subtitle_word_hl_checkbox') else False,
+            "subtitle_color": list(self._subtitle_color),
+            "subtitle_hl_color": list(self._subtitle_hl_color),
         }
         try:
             path = self._get_config_path()
@@ -1160,6 +1765,49 @@ class AutoCutTab(QWidget):
             font_idx = cfg.get("font_index", 0)
             if 0 <= font_idx < self.font_combo.count():
                 self.font_combo.setCurrentIndex(font_idx)
+
+            # Auto Subtitle
+            if hasattr(self, 'subtitle_enable_checkbox'):
+                self.subtitle_enable_checkbox.setChecked(cfg.get("subtitle_enabled", False))
+            if hasattr(self, 'subtitle_model_combo'):
+                model_val = cfg.get("subtitle_model", "base")
+                idx_m = self.subtitle_model_combo.findData(model_val)
+                if idx_m >= 0:
+                    self.subtitle_model_combo.setCurrentIndex(idx_m)
+            if hasattr(self, 'subtitle_beam_size_spin'):
+                self.subtitle_beam_size_spin.setValue(cfg.get("subtitle_beam_size", 5))
+            if hasattr(self, 'subtitle_initial_prompt_input'):
+                self.subtitle_initial_prompt_input.setText(cfg.get("subtitle_initial_prompt", ""))
+            if hasattr(self, 'subtitle_font_name_input'):
+                self.subtitle_font_name_input.setText(cfg.get("subtitle_font_name", "Arial"))
+            if hasattr(self, 'subtitle_font_size_input'):
+                self.subtitle_font_size_input.setValue(cfg.get("subtitle_font_size", 72))
+            if hasattr(self, 'subtitle_outline_input'):
+                self.subtitle_outline_input.setValue(cfg.get("subtitle_outline", 3.0))
+            if hasattr(self, 'subtitle_shadow_input'):
+                self.subtitle_shadow_input.setValue(cfg.get("subtitle_shadow", 2.0))
+            if hasattr(self, 'subtitle_margin_input'):
+                self.subtitle_margin_input.setValue(cfg.get("subtitle_margin_v", 120))
+            if hasattr(self, 'subtitle_max_chars_input'):
+                self.subtitle_max_chars_input.setValue(cfg.get("subtitle_max_chars", 40))
+            if hasattr(self, 'subtitle_max_words_input'):
+                self.subtitle_max_words_input.setValue(cfg.get("subtitle_max_words", 5))
+            if hasattr(self, 'subtitle_max_lines_input'):
+                self.subtitle_max_lines_input.setValue(cfg.get("subtitle_max_lines", 1))
+            if hasattr(self, 'subtitle_word_hl_checkbox'):
+                self.subtitle_word_hl_checkbox.setChecked(cfg.get("subtitle_word_hl", False))
+            if "subtitle_color" in cfg:
+                self._subtitle_color = tuple(cfg["subtitle_color"])
+                if hasattr(self, 'subtitle_color_preview'):
+                    self.subtitle_color_preview.setStyleSheet(
+                        f"background-color: rgb{self._subtitle_color}; border: 1px solid #555; border-radius: 3px;"
+                    )
+            if "subtitle_hl_color" in cfg:
+                self._subtitle_hl_color = tuple(cfg["subtitle_hl_color"])
+                if hasattr(self, 'subtitle_hl_color_preview'):
+                    self.subtitle_hl_color_preview.setStyleSheet(
+                        f"background-color: rgb{self._subtitle_hl_color}; border: 1px solid #555; border-radius: 3px;"
+                    )
 
             if not silent:
                 self.log(f"✅ Đã tải cấu hình từ: {path}")
@@ -1407,12 +2055,14 @@ class AutoCutTab(QWidget):
         preview_header_layout.addStretch()
         layout.addWidget(preview_header_widget)
 
-        # Tạo QLabel để hiển thị thumbnail
-        self.preview_label = QLabel()
+        # Tạo QLabel để hiển thị thumbnail (DraggablePreviewLabel hỗ trợ kéo thả vị trí subtitle)
+        self.preview_label = DraggablePreviewLabel()
         self.preview_label.setObjectName("previewLabel")
         self.preview_label.setMinimumHeight(240)
         self.preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.preview_label.setText("Chưa có video")
+        self.preview_label.setToolTip("Kéo thả trên khung preview để điều chỉnh vị trí Subtitle (Margin Bottom)")
+        self.preview_label.position_changed.connect(self._on_preview_position_dragged)
         self.preview_label.setStyleSheet("""
             QLabel {
                 color: #7f8c8d;
@@ -1722,7 +2372,19 @@ class AutoCutTab(QWidget):
                             break
 
                 part_text = f"{self.part_suffix.text()} 1" if self.show_part_checkbox.isChecked() else ""
-                dummy_thread.create_overlay_image(current_preview_title, part_text, temp_overlay)
+                
+                sub_preview_kwargs = {}
+                if hasattr(self, 'subtitle_enable_checkbox') and self.subtitle_enable_checkbox.isChecked():
+                    sub_preview_kwargs = {
+                        'subtitle_preview_text': "Lorem ipsum dolor sit amet",
+                        'subtitle_margin_v': self.subtitle_margin_input.value(),
+                        'subtitle_font_size': self.subtitle_font_size_input.value(),
+                        'subtitle_font_name': self.subtitle_font_name_input.text().strip() or "Arial",
+                        'subtitle_color': self._subtitle_color,
+                        'subtitle_outline': self.subtitle_outline_input.value()
+                    }
+
+                dummy_thread.create_overlay_image(current_preview_title, part_text, temp_overlay, **sub_preview_kwargs)
 
                 # Thêm lớp màu overlay nếu có opacity > 0
                 if self.overlay_opacity > 0:
@@ -1895,16 +2557,30 @@ class AutoCutTab(QWidget):
     def update_processing_mode(self):
         mode = self.mode_combo.currentData()
         self.processing_mode = mode
+
+        # Ẩn/hiện URL section
+        if hasattr(self, 'url_section_container'):
+            self.url_section_container.setVisible(mode == "url")
+
         if mode == "single":
             self.video_input.setPlaceholderText("Chọn video...")
+            self.video_input.setEnabled(True)
+            if hasattr(self, 'batch_folder_container'):
+                self.batch_folder_container.setVisible(False)
+        elif mode == "url":
+            # Khi URL mode: ẩn video input row (dùng URL input thay thế)
+            self.video_input.setPlaceholderText("(Video sẽ tự tải từ URL)")
+            self.video_input.setEnabled(False)
             if hasattr(self, 'batch_folder_container'):
                 self.batch_folder_container.setVisible(False)
         else:
             self.video_input.setPlaceholderText("Chọn thư mục chứa video...")
+            self.video_input.setEnabled(True)
             if hasattr(self, 'batch_folder_container'):
                 self.batch_folder_container.setVisible(True)
             
-        self.video_input.setText("")
+        if mode != "url":
+            self.video_input.setText("")
         self.current_video_path = None
         
         # Xóa các widget cũ
@@ -1914,9 +2590,253 @@ class AutoCutTab(QWidget):
                 w.deleteLater()
             self.video_item_widgets.clear()
         
-        self.empty_video_label.setText("Chưa có video nào. Hãy chọn " + ("video" if mode == "single" else "thư mục") + " nguồn.")
+        if mode == "url":
+            self.empty_video_label.setText("Dán URL vào ô bên trên rồi nhấn '▶️ Start Processing' để tự động tải và xử lý.")
+        else:
+            self.empty_video_label.setText("Chưa có video nào. Hãy chọn " + ("video" if mode == "single" else "thư mục") + " nguồn.")
         self.empty_video_label.setVisible(True)
         self.update_preview()
+
+
+    # ── URL Download & Thumbnail ───────────────────────────────────────────────
+
+    def on_fetch_thumb_clicked(self):
+        """Xử lý khi người dùng nhấn nút '🖼️ Get Thumb' vật lý."""
+        url = self.thumb_url_input.text().strip() if hasattr(self, 'thumb_url_input') else ""
+        vid = self.current_video_path if hasattr(self, 'current_video_path') and self.current_video_path else ""
+        
+        if not url and not vid:
+            QMessageBox.warning(self, "Cảnh báo", "Vui lòng nhập link URL thumbnail hoặc chọn video nguồn trước khi lấy thumbnail!")
+            return
+        
+        self.log("🖼️ Đang thử tải/trích xuất thumbnail...")
+        out_dir = os.path.dirname(vid) if vid else os.path.expanduser("~/Downloads")
+        res = fetch_or_extract_thumbnail(url, vid, out_dir, progress_callback=self.log)
+        
+        if res and os.path.exists(res):
+            self.source_thumbnail_path = res
+            self.log("✅ Đã lấy thumbnail thành công!")
+            QMessageBox.information(self, "Thành công", "✅ Đã lấy thumbnail thành công!")
+            self.update_preview_debounced()
+        else:
+            self.log("❌ Không thể lấy thumbnail từ link URL hay video!")
+            QMessageBox.warning(self, "Lỗi", "❌ Không thể lấy thumbnail từ link URL hay video nguồn!")
+
+    def _on_use_thumbnail_changed(self, state):
+        """Callback khi bật/tắt checkbox dùng thumbnail làm nền."""
+        self.use_video_thumbnail = bool(state)
+        if hasattr(self, 'thumb_url_widget'):
+            self.thumb_url_widget.setEnabled(self.use_video_thumbnail)
+        
+        if self.use_video_thumbnail:
+            if self.source_thumbnail_path and os.path.exists(self.source_thumbnail_path):
+                self.thumb_status_label.setText(f"✅ Thumbnail: {Path(self.source_thumbnail_path).name}")
+                self.thumb_status_label.setStyleSheet("color: #10B981; font-size: 10px; font-weight: bold;")
+            elif hasattr(self, 'thumb_url_input') and self.thumb_url_input.text().strip():
+                self.thumb_status_label.setText("⚠️ Nhấn 'Lấy Thumb' hoặc bắt đầu để tải thumb từ link")
+                self.thumb_status_label.setStyleSheet("color: #F59E0B; font-size: 10px; font-style: italic;")
+            else:
+                self.thumb_status_label.setText("ℹ️ Để trống = tự lấy frame đầu video")
+                self.thumb_status_label.setStyleSheet("color: #9CA3AF; font-size: 10px; font-style: italic;")
+                self.log("ℹ️ Bật thumbnail nền — nếu không nhập link thumb, mặc định sẽ lấy frame đầu của video.")
+        else:
+            self.thumb_status_label.setText("Đã tắt thumbnail nền")
+            self.thumb_status_label.setStyleSheet("color: #9CA3AF; font-size: 10px; font-style: italic;")
+
+    def _on_thumb_url_changed(self, text: str):
+        """Callback khi ô link thumbnail thay đổi."""
+        url = text.strip()
+        if not url:
+            self.source_thumbnail_path = ""
+            if self.use_video_thumbnail:
+                self.thumb_status_label.setText("ℹ️ Để trống = tự lấy frame đầu video")
+                self.thumb_status_label.setStyleSheet("color: #9CA3AF; font-size: 10px; font-style: italic;")
+        else:
+            if self.source_thumbnail_path:
+                self.source_thumbnail_path = ""
+            if self.use_video_thumbnail:
+                self.thumb_status_label.setText("⚠️ Nhấn 'Lấy Thumb' để tải từ link")
+                self.thumb_status_label.setStyleSheet("color: #F59E0B; font-size: 10px; font-style: italic;")
+
+    def fetch_thumbnail_from_url(self):
+        """Tải riêng thumbnail từ ô link thumbnail."""
+        if not hasattr(self, 'thumb_url_input'):
+            return
+
+        url = self.thumb_url_input.text().strip()
+        if not url:
+            self.source_thumbnail_path = ""
+            self.thumb_status_label.setText("ℹ️ Để trống = tự lấy frame đầu video")
+            self.thumb_status_label.setStyleSheet("color: #9CA3AF; font-size: 10px; font-style: italic;")
+            self.log("ℹ️ Ô link thumbnail rỗng. Mặc định sẽ lấy frame đầu của video làm thumb khi xử lý.")
+            return
+
+        output_dir = self.output_input.text().strip()
+        if not output_dir:
+            output_dir = str(Path.home() / "Documents" / "VideoEditor" / "Output")
+
+        download_dir = os.path.join(output_dir, "_thumbnails")
+
+        # Huỷ thread cũ nếu đang chạy
+        if hasattr(self, '_thumb_downloader_thread') and self._thumb_downloader_thread and self._thumb_downloader_thread.isRunning():
+            self._thumb_downloader_thread.stop()
+            self._thumb_downloader_thread.wait(1000)
+
+        self.log(f"🖼️ Đang lấy thumbnail từ link: {url[:80]}...")
+        self.fetch_thumb_btn.setEnabled(False)
+        self.fetch_thumb_btn.setText("⏳ Đang lấy...")
+        self.thumb_status_label.setText("⏳ Đang tải thumbnail...")
+        self.thumb_status_label.setStyleSheet("color: #F59E0B; font-size: 10px; font-weight: bold;")
+
+        self._thumb_downloader_thread = ThumbnailDownloaderThread(url, download_dir, parent=self)
+        self._thumb_downloader_thread.progress.connect(self.log)
+        self._thumb_downloader_thread.finished.connect(self._on_thumbnail_fetch_finished)
+        self._thumb_downloader_thread.finished.connect(self._thumb_downloader_thread.deleteLater)
+        self._thumb_downloader_thread.start()
+
+    def _on_thumbnail_fetch_finished(self, success: bool, thumb_path: str, error_msg: str):
+        """Callback khi tải xong thumbnail từ URL."""
+        if hasattr(self, 'fetch_thumb_btn'):
+            self.fetch_thumb_btn.setEnabled(True)
+            self.fetch_thumb_btn.setText("🖼️ Lấy Thumb")
+
+        if success and thumb_path and os.path.exists(thumb_path):
+            self.source_thumbnail_path = thumb_path
+            self.use_video_thumbnail = True
+            self.use_thumbnail_checkbox.setChecked(True)
+            self.thumb_status_label.setText(f"✅ Thumbnail: {Path(thumb_path).name}")
+            self.thumb_status_label.setStyleSheet("color: #10B981; font-size: 10px; font-weight: bold;")
+            self.log(f"✅ Đã tải thumbnail thành công: {Path(thumb_path).name}")
+        else:
+            self.source_thumbnail_path = ""
+            self.thumb_status_label.setText("❌ Lỗi lấy thumb (sẽ dùng frame đầu)")
+            self.thumb_status_label.setStyleSheet("color: #EF4444; font-size: 10px;")
+            self.log(f"⚠️ Lỗi lấy thumbnail từ link: {error_msg}. Sẽ dùng frame đầu của video khi xử lý.")
+
+    def download_from_url(self):
+        """Bắt đầu tải video từ URL nhập vào."""
+        url = self.url_input.text().strip()
+        if not url:
+            self.log("⚠️ Vui lòng nhập URL trước khi tải!")
+            return
+
+        if not (url.startswith("http://") or url.startswith("https://") or url.startswith("www.")):
+            self.log("❌ URL không hợp lệ! Vui lòng dán đúng link video (bắt đầu bằng http:// hoặc https://).")
+            return
+
+        output_dir = self.output_input.text().strip()
+        if not output_dir:
+            self.log("⚠️ Vui lòng chọn thư mục xuất trước!")
+            return
+
+        # Download thư mục con riêng trong output
+        download_dir = os.path.join(output_dir, "_downloaded")
+
+        # Huỷ thread cũ nếu có
+        if self._downloader_thread and self._downloader_thread.isRunning():
+            self._downloader_thread.stop()
+            self._downloader_thread.wait(2000)
+
+        self.log(f"🔗 Bắt đầu tải: {url[:80]}...")
+        self.download_btn.setEnabled(False)
+        self.download_btn.setText("⏳ Đang tải...")
+        self.cancel_download_btn.setVisible(True)
+        self.thumb_status_label.setText("⬇️ Đang tải video...")
+        self.thumb_status_label.setStyleSheet("color: #F59E0B; font-size: 10px; font-weight: bold;")
+
+        self._downloader_thread = VideoDownloaderThread(url, download_dir, parent=self)
+        self._downloader_thread.progress.connect(self._on_download_progress)
+        self._downloader_thread.finished.connect(self._on_download_finished)
+        self._downloader_thread.finished.connect(self._downloader_thread.deleteLater)
+        self._downloader_thread.start()
+
+    def cancel_download(self):
+        """Huỷ bỏ quá trình tải video."""
+        if self._downloader_thread and self._downloader_thread.isRunning():
+            self._downloader_thread.stop()
+            self.log("⚠️ Đang huỷ tải video...")
+        self.download_btn.setEnabled(True)
+        self.download_btn.setText("⬇️ Tải")
+        self.cancel_download_btn.setVisible(False)
+        self.thumb_status_label.setText("Đã huỷ tải")
+        self.thumb_status_label.setStyleSheet("color: #EF4444; font-size: 10px;")
+
+    def _on_download_progress(self, message: str):
+        """Hiển thị tiến trình tải video."""
+        self.log(message)
+        # Cập nhật status label với thông tin ngắn gọn
+        short = message[:60] + "..." if len(message) > 60 else message
+        self.thumb_status_label.setText(short)
+
+    def _on_download_finished(self, success: bool, video_path: str, thumb_path: str):
+        """Callback khi tải video hoàn tất."""
+        self.download_btn.setEnabled(True)
+        self.download_btn.setText("⬇️ Tải")
+        self.cancel_download_btn.setVisible(False)
+
+        if not success:
+            self.log("❌ Tải video thất bại.")
+            self.thumb_status_label.setText("❌ Tải thất bại")
+            self.thumb_status_label.setStyleSheet("color: #EF4444; font-size: 10px;")
+            return
+
+        self.log(f"✅ Tải xong: {Path(video_path).name}")
+
+        # Lưu thumbnail path
+        if thumb_path and os.path.exists(thumb_path):
+            self.source_thumbnail_path = thumb_path
+            self.use_thumbnail_checkbox.setChecked(True)
+            self.use_video_thumbnail = True
+            self.thumb_status_label.setText(f"✅ Thumbnail: {Path(thumb_path).name}")
+            self.thumb_status_label.setStyleSheet("color: #10B981; font-size: 10px; font-weight: bold;")
+            self.log(f"🖼️ Thumbnail đã sẵn sàng: {Path(thumb_path).name}")
+        else:
+            # Không có thumbnail → sẽ lấy frame đầu video khi xử lý
+            self.source_thumbnail_path = ""
+            self.thumb_status_label.setText("ℹ️ Sẽ dùng frame đầu video")
+            self.thumb_status_label.setStyleSheet("color: #6B7280; font-size: 10px; font-style: italic;")
+            self.log("ℹ️ Không có thumbnail riêng, sẽ lấy frame đầu video khi xử lý.")
+
+        # Tự động load video vào danh sách
+        if video_path and os.path.exists(video_path):
+            self.process_selected_input(video_path, is_dir=False)
+        else:
+            self.log("⚠️ Không tìm thấy file video sau khi tải!")
+
+    def _on_url_download_then_process(self, success: bool, video_path: str, thumb_path: str):
+        """Callback đặc biệt khi nhấn Start Processing ở URL mode: tải xong → tự xử lý."""
+        self.download_btn.setEnabled(True)
+        self.download_btn.setText("⬇️ Tải")
+        self.cancel_download_btn.setVisible(False)
+
+        if not success or not video_path:
+            self.log("❌ Tải video thất bại, không thể tiếp tục xử lý.")
+            self.thumb_status_label.setText("❌ Tải thất bại")
+            self.thumb_status_label.setStyleSheet("color: #EF4444; font-size: 10px;")
+            return
+
+        self.log(f"✅ Tải xong: {Path(video_path).name} → bắt đầu xử lý...")
+
+        # Lưu thumbnail
+        if thumb_path and os.path.exists(thumb_path):
+            self.source_thumbnail_path = thumb_path
+            self.use_video_thumbnail = True
+            self.thumb_status_label.setText(f"✅ Thumbnail: {Path(thumb_path).name}")
+            self.thumb_status_label.setStyleSheet("color: #10B981; font-size: 10px; font-weight: bold;")
+        else:
+            self.source_thumbnail_path = ""
+            self.thumb_status_label.setText("ℹ️ Sẽ dùng frame đầu video")
+            self.thumb_status_label.setStyleSheet("color: #6B7280; font-size: 10px;")
+
+        # Load video vào list rồi tự động start_processing
+        if os.path.exists(video_path):
+            self.process_selected_input(video_path, is_dir=False)
+            # Sau khi load xong, gọi start_processing (video đã có trong list)
+            self.start_processing()
+        else:
+            self.log("⚠️ File video không tồn tại sau khi tải!")
+
+    # ── End URL Download ───────────────────────────────────────────────────────
 
     def select_video(self):
         if self.processing_mode == "single":
@@ -2040,11 +2960,284 @@ class AutoCutTab(QWidget):
     def log(self, message):
         """Route all log messages to the global Process Log via signal."""
         self.log_message.emit(message)
-    
+
+    # ── Scene Split helpers ───────────────────────────────────────────────────
+
+    def get_scene_split_params(self):
+        """Return current scene-split settings as a dict (or None if disabled)."""
+        if not hasattr(self, 'scene_split_checkbox') or not self.scene_split_checkbox.isChecked():
+            return None
+        return {
+            "threshold":    self.scene_threshold_input.value(),
+            "delete_pct":   self.scene_delete_pct_input.value(),
+            "min_dur":      self.scene_min_dur_input.value(),
+            "method":       self.scene_method_combo.currentData() if hasattr(self, 'scene_method_combo') else "hybrid",
+        }
+
+    def _on_scene_method_changed(self, _index):
+        """Update threshold label/range/default when method dropdown changes."""
+        method = self.scene_method_combo.currentData()
+        if method in ("hybrid", "histogram", "ssim"):
+            self.scene_threshold_label_item.setText("Adaptive K (1-4):")
+            self.scene_threshold_input.setRange(0.5, 5.0)
+            self.scene_threshold_input.setSingleStep(0.1)
+            self.scene_threshold_input.setValue(2.0)
+            self.scene_threshold_input.setToolTip(
+                "Adaptive K -- threshold = mean + K x std\n"
+                "Cao = it canh hon (chi cat manh), thap = nhieu canh hon.\n"
+                "Khuyen: 1.5-2.5"
+            )
+        elif method == "ffmpeg":
+            self.scene_threshold_label_item.setText("scdet threshold (0-100):")
+            self.scene_threshold_input.setRange(0.0, 100.0)
+            self.scene_threshold_input.setSingleStep(5.0)
+            self.scene_threshold_input.setValue(40.0)
+            self.scene_threshold_input.setToolTip(
+                "FFmpeg scdet threshold (0-100).\n"
+                "Thap = nhay hon (nhieu canh), cao = it nhay (it canh).\n"
+                "Mac dinh: 40."
+            )
+        elif method == "pyscene":
+            self.scene_threshold_label_item.setText("ContentDetector threshold:")
+            self.scene_threshold_input.setRange(1.0, 100.0)
+            self.scene_threshold_input.setSingleStep(1.0)
+            self.scene_threshold_input.setValue(27.0)
+            self.scene_threshold_input.setToolTip(
+                "PySceneDetect ContentDetector threshold.\n"
+                "Thap = nhay hon, cao = it canh hon.\n"
+                "Mac dinh: 27. Dai thuc te: 10-40."
+            )
+
+
+    def run_scene_analysis_preview(self):
+        """Run scene detection asynchronously in background thread so UI never freezes."""
+        if not hasattr(self, 'video_item_widgets') or not self.video_item_widgets:
+            self.scene_status_label.setText("Chưa có video nào được chọn.")
+            self.scene_status_label.setStyleSheet(
+                "color: #f59e0b; font-size: 10px; background: transparent; border: none;")
+            return
+
+        first_widget = self.video_item_widgets[0]
+        video_path   = first_widget.path
+        start_sec, end_sec = first_widget.get_cut_times()
+        threshold    = self.scene_threshold_input.value()
+        delete_pct   = self.scene_delete_pct_input.value()
+        min_dur      = self.scene_min_dur_input.value()
+        method       = self.scene_method_combo.currentData() if hasattr(self, 'scene_method_combo') else "hybrid"
+
+        self.scene_analyze_btn.setEnabled(False)
+        self.scene_status_label.setText(f"⏳ Đang phân tích [{method}]... (xem nhật ký ở bảng log)")
+        self.scene_status_label.setStyleSheet(
+            "color: #a78bfa; font-size: 10px; font-style: italic; background: transparent; border: none;")
+
+        self._analysis_thread = SceneAnalysisThread(
+            video_path, start_sec, end_sec, threshold, delete_pct, min_dur, method=method, seed=42
+        )
+        self._analysis_thread.log_msg.connect(self.log)
+        self._analysis_thread.analysis_finished.connect(
+            lambda timestamps, skip_ranges, n_scenes, n_deleted, total_deleted_sec, err_msg, report_lines:
+            self._on_scene_analysis_finished(timestamps, skip_ranges, n_scenes, n_deleted, total_deleted_sec, err_msg, report_lines, method, threshold)
+        )
+        self._analysis_thread.start()
+
+    def _on_scene_analysis_finished(self, timestamps, skip_ranges, n_scenes, n_deleted, total_deleted_sec, err_msg, report_lines, method, threshold):
+        self.scene_analyze_btn.setEnabled(True)
+        if err_msg:
+            self.scene_status_label.setText(f"❌ Lỗi: {err_msg[:80]}")
+            self.scene_status_label.setStyleSheet(
+                "color: #f87171; font-size: 10px; background: transparent; border: none;")
+            self.log(f"Scene detection lỗi: {err_msg}")
+        else:
+            msg = (
+                f"✅ [{method.upper()}] Tìm được {n_scenes} cảnh  |  "
+                f"Sẽ xóa ~{n_deleted} cảnh (~{total_deleted_sec:.1f}s)"
+            )
+            self.scene_status_label.setText(msg)
+            self.scene_status_label.setStyleSheet(
+                "color: #34d399; font-size: 10px; font-weight: 600; "
+                "background: transparent; border: none;")
+
+            # Print detailed report to the process log panel
+            for line in report_lines:
+                self.log(line)
+
+    # End Scene Split
+
+
+    # ── Auto Subtitle helpers ─────────────────────────────────────────────────
+
+    def _on_subtitle_toggled(self, enabled: bool):
+        """Called when the Auto Subtitle checkbox is toggled."""
+        self.subtitle_config.enabled = enabled
+        if enabled:
+            self.log("🎙 Auto Subtitle đã bật. Kéo thả trên khung Preview để chỉnh vị trí.")
+        else:
+            self.log("🎙 Auto Subtitle đã tắt.")
+        self.update_preview_debounced()
+
+    def _on_preview_position_dragged(self, margin_v: int):
+        """Called when user drags vertically on the preview label to adjust subtitle margin."""
+        if hasattr(self, 'subtitle_enable_checkbox') and self.subtitle_enable_checkbox.isChecked():
+            self.subtitle_margin_input.blockSignals(True)
+            self.subtitle_margin_input.setValue(margin_v)
+            self.subtitle_margin_input.blockSignals(False)
+            self.update_preview_debounced()
+
+
+    def _build_subtitle_config_from_ui(self) -> "SubtitleConfig":
+        """Read all subtitle UI controls and return a populated SubtitleConfig."""
+        cfg = SubtitleConfig()
+        cfg.enabled = self.subtitle_enable_checkbox.isChecked()
+        cfg.model_size = self.subtitle_model_combo.currentData() or "base"
+        cfg.beam_size = self.subtitle_beam_size_spin.value() if hasattr(self, 'subtitle_beam_size_spin') else 5
+        cfg.initial_prompt = self.subtitle_initial_prompt_input.text().strip() if hasattr(self, 'subtitle_initial_prompt_input') else ""
+        cfg.font_name = self.subtitle_font_name_input.text().strip() or "Arial"
+        cfg.font_size = self.subtitle_font_size_input.value()
+        cfg.outline_width = self.subtitle_outline_input.value()
+        cfg.shadow_depth = self.subtitle_shadow_input.value()
+        cfg.margin_v = self.subtitle_margin_input.value()
+        cfg.enable_word_highlight = self.subtitle_word_hl_checkbox.isChecked()
+        cfg.max_chars_per_line = self.subtitle_max_chars_input.value()
+        cfg.max_words_per_block = self.subtitle_max_words_input.value() if hasattr(self, 'subtitle_max_words_input') else 5
+        cfg.max_lines_per_block = self.subtitle_max_lines_input.value() if hasattr(self, 'subtitle_max_lines_input') else 1
+
+        # Convert RGB display tuples to ASS color strings (&HAABBGGRR)
+        cfg.primary_color = self._rgb_to_ass_color(self._subtitle_color)
+        cfg.highlight_color = self._rgb_to_ass_color(self._subtitle_hl_color)
+        cfg.outline_color = "&H00000000"   # black
+        cfg.shadow_color = "&H80000000"    # semi-transparent black
+        return cfg
+
+    @staticmethod
+    def _rgb_to_ass_color(rgb: tuple, alpha: int = 0) -> str:
+        """Convert an (R, G, B) tuple to ASS color format &HAABBGGRR."""
+        r, g, b = rgb[0], rgb[1], rgb[2]
+        return f"&H{alpha:02X}{b:02X}{g:02X}{r:02X}"
+
+    def _pick_subtitle_color(self):
+        """Open color picker for subtitle text color."""
+        color = QColorDialog.getColor(QColor(*self._subtitle_color), self, "Chọn màu chữ subtitle")
+        if color.isValid():
+            self._subtitle_color = (color.red(), color.green(), color.blue())
+            self.subtitle_color_preview.setStyleSheet(
+                f"background-color: rgb{self._subtitle_color}; border: 1px solid #555; border-radius: 3px;"
+            )
+
+    def _pick_subtitle_hl_color(self):
+        """Open color picker for word-highlight color."""
+        color = QColorDialog.getColor(QColor(*self._subtitle_hl_color), self, "Chọn màu Highlight")
+        if color.isValid():
+            self._subtitle_hl_color = (color.red(), color.green(), color.blue())
+            self.subtitle_hl_color_preview.setStyleSheet(
+                f"background-color: rgb{self._subtitle_hl_color}; border: 1px solid #555; border-radius: 3px;"
+            )
+
+    def _run_subtitle_test(self):
+        """Run subtitle generation on the first video as a dry-run (no video output)."""
+        if not hasattr(self, 'video_item_widgets') or not self.video_item_widgets:
+            self.subtitle_status_label.setText("⚠️ Chưa có video nào được chọn.")
+            self.subtitle_status_label.setStyleSheet(
+                "color: #f59e0b; font-size: 10px; background: transparent; border: none;"
+            )
+            return
+
+        output_dir = self.output_input.text().strip()
+        if not output_dir:
+            self.subtitle_status_label.setText("⚠️ Chưa chọn thư mục xuất.")
+            return
+
+        video_path = self.video_item_widgets[0].path
+        cfg = self._build_subtitle_config_from_ui()
+
+        self.subtitle_test_btn.setEnabled(False)
+        self.subtitle_status_label.setText("⏳ Đang transcribe... (xem nhật ký ở bảng log)")
+        self.subtitle_status_label.setStyleSheet(
+            "color: #a78bfa; font-size: 10px; font-style: italic; background: transparent; border: none;"
+        )
+
+        thread = SubtitleGeneratorThread(video_path, output_dir, cfg, parent=self)
+        thread.progress.connect(self.log)
+        thread.finished.connect(self._on_subtitle_test_finished)
+        thread.finished.connect(thread.deleteLater)
+        self._subtitle_test_thread = thread  # keep reference
+        thread.start()
+
+    def _on_subtitle_test_finished(self, success: bool, ass_path: str, error: str):
+        """Callback for the test subtitle generation."""
+        self.subtitle_test_btn.setEnabled(True)
+        if success:
+            self.subtitle_status_label.setText(f"✅ Test OK → {Path(ass_path).name}")
+            self.subtitle_status_label.setStyleSheet(
+                "color: #34d399; font-size: 10px; font-weight: 600; background: transparent; border: none;"
+            )
+            self.log(f"✅ Subtitle test thành công: {ass_path}")
+        else:
+            self.subtitle_status_label.setText(f"❌ Lỗi: {error[:80]}")
+            self.subtitle_status_label.setStyleSheet(
+                "color: #f87171; font-size: 10px; background: transparent; border: none;"
+            )
+
+    def _generate_subtitle_for_video(self, video_path: str, output_dir: str,
+                                     cfg: "SubtitleConfig", on_done) -> "SubtitleGeneratorThread":
+        """
+        Spin up a SubtitleGeneratorThread for video_path.
+        on_done(success, ass_path, error) is called when finished.
+        Returns the thread (caller must keep a reference).
+        """
+        thread = SubtitleGeneratorThread(video_path, output_dir, cfg, parent=self)
+        thread.progress.connect(self.log)
+        thread.finished.connect(on_done)
+        thread.finished.connect(thread.deleteLater)
+        thread.start()
+        return thread
+
+    # ── End Auto Subtitle helpers ──────────────────────────────────────────────
+
+
     def start_processing(self):
         import time
         self.start_time = time.time()
-        
+
+        # URL mode: nếu chưa có video trong list → tự tải trước
+        if self.processing_mode == "url":
+            url = self.url_input.text().strip() if hasattr(self, 'url_input') else ""
+            out_dir = self.output_input.text().strip()
+
+            if not out_dir:
+                self.log("❌ Vui lòng chọn thư mục xuất trước!")
+                return
+
+            if not url:
+                self.log("❌ Vui lòng nhập URL video trước!")
+                return
+
+            if not (url.startswith("http://") or url.startswith("https://") or url.startswith("www.")):
+                self.log("❌ URL không hợp lệ! Vui lòng dán đúng link video (bắt đầu bằng http:// hoặc https://).")
+                return
+
+            # Nếu chưa có video nào trong list → tải rồi tự xử lý
+            if not hasattr(self, 'video_item_widgets') or not self.video_item_widgets:
+                self.log("🔗 Đang tải video từ URL, sau đó sẽ tự xử lý...")
+                # Kết nối tạm để sau khi tải xong tự động gọi lại start_processing
+                download_dir = os.path.join(out_dir, "_downloaded")
+                if self._downloader_thread and self._downloader_thread.isRunning():
+                    self._downloader_thread.stop()
+                    self._downloader_thread.wait(2000)
+
+                self.download_btn.setEnabled(False)
+                self.download_btn.setText("⏳ Đang tải...")
+                self.cancel_download_btn.setVisible(True)
+                self.thumb_status_label.setText("⬇️ Đang tải video...")
+                self.thumb_status_label.setStyleSheet("color: #F59E0B; font-size: 10px; font-weight: bold;")
+
+                self._downloader_thread = VideoDownloaderThread(url, download_dir, parent=self)
+                self._downloader_thread.progress.connect(self._on_download_progress)
+                # Kết nối finished vào callback đặc biệt: tải xong → tự start_processing
+                self._downloader_thread.finished.connect(self._on_url_download_then_process)
+                self._downloader_thread.finished.connect(self._downloader_thread.deleteLater)
+                self._downloader_thread.start()
+                return  # Chờ download xong
+
         if not hasattr(self, 'video_item_widgets') or not self.video_item_widgets:
             self.log("❌ Vui lòng chọn " + ("video" if self.processing_mode == 'single' else "thư mục") + " đầu vào!")
             self.status_display.setText("🔴 Thiếu đầu vào")
@@ -2056,6 +3249,14 @@ class AutoCutTab(QWidget):
             self.status_display.setText("🔴 Thiếu thư mục")
             self.status_display.setStyleSheet(self.status_display.styleSheet().replace("#27ae60", "#e74c3c").replace("#e8f6f3", "#fadbd8"))
             return
+
+        # Nếu bật thumbnail và ô link thumb có nhập link mà chưa tải -> tự tải thumb trước
+        thumb_url = self.thumb_url_input.text().strip() if hasattr(self, 'thumb_url_input') else ""
+        if self.use_video_thumbnail and thumb_url and not self.source_thumbnail_path:
+            self.log("🖼️ Đang tự động tải thumbnail từ link đã nhập...")
+            self.fetch_thumbnail_from_url()
+            if hasattr(self, '_thumb_downloader_thread') and self._thumb_downloader_thread:
+                self._thumb_downloader_thread.wait(10000)
 
         # Prepare processing queue
         self.video_queue = []
@@ -2249,10 +3450,12 @@ class AutoCutTab(QWidget):
         text_border_color = self.text_border_color
         text_border_width = self.text_border_width
         
-        # Generate subtitles automatically if enabled
-        subtitle_file_to_use = None
-        # (Subtitle feature is currently disabled)
-        
+        # Subtitle config
+        subtitle_config = self._build_subtitle_config_from_ui()
+
+        # Scene Split parameters (processed in background thread to prevent UI freezing)
+        scene_params = self.get_scene_split_params()
+
         # Determine original sizes for the current video to allow correct zoom (each video might have different dimensions)
         try:
             cmd_size = [
@@ -2264,7 +3467,7 @@ class AutoCutTab(QWidget):
         except:
             orig_w, orig_h = self.original_video_width or 1080, self.original_video_height or 1920
 
-        # Start processing thread với các tham số mới (bao gồm text border)
+        # Start processing thread với các tham số mới (bao gồm text border và scene_params)
         self.thread = VideoProcessThread(
             src_file,
             dest_dir,
@@ -2298,10 +3501,17 @@ class AutoCutTab(QWidget):
             overlay_color=self.overlay_color,
             overlay_opacity=self.overlay_opacity,
             
-            # Subtitle parameters (subtitle feature is disabled, file=None)
-            subtitle_file=subtitle_file_to_use,
+            # Subtitle parameters
+            subtitle_config=subtitle_config,
             subtitle_font_size=self.subtitle_font_size,
-            subtitle_y_position=1400
+            subtitle_y_position=1400,
+            scene_params=scene_params,
+            enable_fade_transition=self.fade_transition_checkbox.isChecked() if hasattr(self, 'fade_transition_checkbox') else True,
+            fade_duration=self.fade_duration_input.value() if hasattr(self, 'fade_duration_input') else 0.3,
+
+            # Thumbnail background
+            use_video_thumbnail=True,
+            source_thumbnail_path=self.thumb_url_input.text().strip() if hasattr(self, 'thumb_url_input') else "",
         )
         
         self.thread.progress.connect(self.update_progress)

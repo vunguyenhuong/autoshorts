@@ -32,6 +32,10 @@ class FetcherThread(QThread):
         """
         import re
         url = url.strip().rstrip('/')
+        if url.startswith('@'):
+            url = f"https://www.youtube.com/{url}"
+        elif url.startswith(('youtube.com/', 'www.youtube.com/')):
+            url = f"https://{url}"
         
         # Check if it's a direct video link
         # YouTube: watch?v=, /shorts/, youtu.be/
@@ -162,6 +166,7 @@ class FetcherThread(QThread):
                         all_videos.extend(videos)
                     except Exception as e:
                         url = task['url']
+                        self.progress.emit(f"❌ Lỗi khi quét {url}: {e}")
             self.finished.emit(all_videos)
         except Exception as e:
             self.error.emit(str(e))
@@ -279,7 +284,7 @@ class DownloaderThread(QThread):
                 self.progress.emit(f"{label} ⏭️ Bỏ qua (đã tải): {url}")
                 return 'skipped', video
 
-            import yt_dlp
+            import json as _json_mod
             import re
             from datetime import datetime
 
@@ -296,28 +301,47 @@ class DownloaderThread(QThread):
             vid_date = None
 
             try:
+                import yt_dlp
                 with yt_dlp.YoutubeDL(info_opts) as ydl:
                     info = ydl.extract_info(url, download=False)
             except Exception as e:
                 err_type = type(e).__name__
                 err_msg = str(e)
-                self.progress.emit(f"{label} ❌ Không lấy được thông tin [{err_type}]: {url} — {err_msg}")
-                with lock: failed_urls.append(url)
-                return 'failed', video
+                try:
+                    _no_win = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
+                    _res = subprocess.run([ytdlp_exe, '--no-playlist', '--dump-single-json', '--no-warnings', url], capture_output=True, text=True, timeout=60, encoding='utf-8', creationflags=_no_win)
+                    _lines = [l for l in (_res.stdout or '').strip().splitlines() if l.strip().startswith('{')]
+                    if _lines:
+                        info = _json_mod.loads(_lines[-1])
+                except Exception:
+                    pass
+                if info is None:
+                    # In language mode, Phase 2a has its own metadata pipeline — don't fail here
+                    if self.selected_language and self.selected_language != "Mặc định":
+                        self.progress.emit(f"{label} ⚠️ Phase 1 metadata lỗi [{err_type}], chuyển sang Phase 2a (language mode): {url}")
+                    else:
+                        self.progress.emit(f"{label} ❌ Không lấy được thông tin [{err_type}]: {url} — {err_msg}")
+                        with lock: failed_urls.append(url)
+                        return 'failed', video
 
             if not info:
-                self.progress.emit(f"{label} ❌ Không lấy được thông tin (yt-dlp trả về rỗng): {url}")
-                with lock: failed_urls.append(url)
-                return 'failed', video
+                if self.selected_language and self.selected_language != "Mặc định":
+                    # Language mode: skip Phase 1 filters, Phase 2a will get its own metadata
+                    self.progress.emit(f"{label} ℹ️ Bỏ qua Phase 1, dùng Phase 2a để lấy metadata (language mode): {url}")
+                else:
+                    self.progress.emit(f"{label} ❌ Không lấy được thông tin (yt-dlp trả về rỗng): {url}")
+                    with lock: failed_urls.append(url)
+                    return 'failed', video
 
-            if not channel_url:
-                channel_url = info.get('uploader_url') or info.get('channel_url') or info.get('uploader_id')
-            if not video.get('view_count'):
-                video['view_count'] = info.get('view_count', 0)
+            if info:
+                if not channel_url:
+                    channel_url = info.get('uploader_url') or info.get('channel_url') or info.get('uploader_id')
+                if not video.get('view_count'):
+                    video['view_count'] = info.get('view_count', 0)
 
-            # 2. Check Resolution Filter
-            width = info.get('width')
-            height = info.get('height')
+            # 2. Check Resolution Filter (skip if no metadata available)
+            width = info.get('width') if info else None
+            height = info.get('height') if info else None
             if width and height:
                 is_direct = video.get('channel_url') is None or "Video Trực Tiếp" in video.get('title', "")
                 
@@ -336,9 +360,9 @@ class DownloaderThread(QThread):
                         self.progress.emit(f"{label} ⏭️ Bỏ qua (Video ngang không phù hợp chế độ Shorts): {url}")
                         return 'skipped', video
 
-            # 3. Check Date Filter
-            udate = info.get('upload_date')
-            ts = info.get('timestamp')
+            # 3. Check Date Filter (skip if no metadata available)
+            udate = info.get('upload_date') if info else None
+            ts = info.get('timestamp') if info else None
 
             if udate and len(udate) == 8:
                 try:
@@ -377,74 +401,158 @@ class DownloaderThread(QThread):
 
             # ── Phase 2a: Language-specific mode — subprocess yt-dlp + deno ──
             if self.selected_language and self.selected_language != "Mặc định":
-                # Locate yt-dlp exe that supports deno (media-downloader's version is reliable)
-                MD_YTDLP = r'C:/Users/Vu Nguyen Huong/AppData/Roaming/media-downloader/bin/yt-dlp.exe'
-                MD_DENO  = r'C:/Users/Vu Nguyen Huong/AppData/Roaming/media-downloader/bin/deno.exe'
-                ytdlp_exe = MD_YTDLP if os.path.exists(MD_YTDLP) else self.downloader.get_ytdlp_exe()
-                deno_exe  = MD_DENO  if os.path.exists(MD_DENO)  else None
+                # Locate yt-dlp exe and deno runtime (dynamic path via %APPDATA%)
+                appdata = os.environ.get('APPDATA', '')
+                md_bin = os.path.join(appdata, 'media-downloader', 'bin') if appdata else ''
+                MD_YTDLP = os.path.join(md_bin, 'yt-dlp.exe') if md_bin else ''
+                MD_DENO  = os.path.join(md_bin, 'deno.exe')   if md_bin else ''
+                ytdlp_exe = MD_YTDLP if (MD_YTDLP and os.path.exists(MD_YTDLP)) else self.downloader.get_ytdlp_exe()
+                deno_exe  = MD_DENO  if (MD_DENO  and os.path.exists(MD_DENO))  else None
 
-                # Step A: Run -F to get full format list
-                list_cmd = [ytdlp_exe]
+                # Step A: Get JSON metadata via -j (more reliable than parsing -F text)
+                # Try with Chrome cookies first (to bypass bot detection), fallback without
+                base_cmd = [ytdlp_exe]
                 if deno_exe:
-                    list_cmd += ['--js-runtimes', f'deno:{deno_exe}']
-                list_cmd += ['--no-playlist', '--quiet', '--no-warnings', '-F', url]
+                    base_cmd += ['--js-runtimes', f'deno:{deno_exe}']
+                base_cmd += ['--no-playlist', '--quiet', '--no-warnings']
+
+                fmt_output = ''
+                used_cookies = False
+                for attempt, use_cookies in enumerate([(True,), (False,)], 1):
+                    list_cmd = base_cmd.copy()
+                    if use_cookies[0]:
+                        list_cmd += ['--cookies-from-browser', 'chrome']
+                    list_cmd += ['-j', url]
+
+                    try:
+                        _no_window = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
+                        fmt_result = subprocess.run(list_cmd, capture_output=True, text=True, timeout=90,
+                                                   encoding='utf-8', creationflags=_no_window)
+                        fmt_output = fmt_result.stdout.strip()
+                        if fmt_output and fmt_output.startswith('{'):
+                            used_cookies = use_cookies[0]
+                            break  # Got valid JSON, done
+                        # If no valid JSON, try next attempt
+                        if attempt == 1:
+                            self.progress.emit(f"{label} ⚠️ Thử lại không dùng cookies...")
+                    except subprocess.TimeoutExpired:
+                        if attempt == 2:
+                            self.progress.emit(f"{label} ⏭️ Timeout khi lấy format: {url}")
+                            return 'skipped', video
+                    except Exception as e:
+                        if attempt == 2:
+                            self.progress.emit(f"{label} ❌ Lỗi lấy format list: {e}")
+                            with lock: failed_urls.append(url)
+                            return 'failed', video
+
+                # Step B: Parse JSON and find best audio + video formats
+                target_lang = self.selected_language
+                # Build list of acceptable language tags (e.g. 'de-DE' → also accept 'de')
+                accept_langs = [target_lang.lower()]
+                if "-" in target_lang:
+                    accept_langs.append(target_lang.split('-')[0].lower())
+
+                chosen_audio_id = None
+                chosen_video_id = None
+                best_audio_br = -1
+                best_video_h = 0
+                best_video_avc = False
 
                 try:
-                    _no_window = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
-                    fmt_result = subprocess.run(list_cmd, capture_output=True, text=True, timeout=60,
-                                               creationflags=_no_window)
-                    fmt_output = fmt_result.stdout + fmt_result.stderr
-                except subprocess.TimeoutExpired:
-                    self.progress.emit(f"{label} ⏭️ Timeout khi lấy format: {url}")
-                    return 'skipped', video
-                except Exception as e:
-                    self.progress.emit(f"{label} ❌ Lỗi lấy format list: {e}")
-                    with lock: failed_urls.append(url)
-                    return 'failed', video
+                    import json as _json
+                    meta = _json.loads(fmt_output)
+                    all_formats = meta.get('formats', [])
+                except Exception:
+                    all_formats = []
+                    self.progress.emit(f"{label} ⚠️ Không parse được JSON metadata, thử fallback...")
 
-                # Step B: Parse -F output to find best [language] format at 1080p+
-                target_lang = self.selected_language
-                # Create multiple possible tags for better matching
-                possible_tags = [f"[{target_lang}]"]
-                if "-" in target_lang:
-                    possible_tags.append(f"[{target_lang.split('-')[0]}]")
-                
-                chosen_format_id = None
-                best_height = 0
-                for line in fmt_output.splitlines():
-                    if not any(tag in line for tag in possible_tags):
-                        continue
-                    res_match = re.search(r'(\d+)x(\d+)', line)
-                    if not res_match:
-                        continue
-                    w, h = int(res_match.group(1)), int(res_match.group(2))
-                    if w >= 1080 and w > best_height:
-                        best_height = w
-                        parts = line.split()
-                        chosen_format_id = parts[0] if parts else None
+                for f in all_formats:
+                    f_lang = str(f.get('language', '') or '').lower()
+                    f_vc = str(f.get('vcodec', 'none') or 'none')
+                    f_ac = str(f.get('acodec', 'none') or 'none')
+                    f_id = f.get('format_id', '')
+                    f_h = f.get('height') or 0
+                    f_abr = f.get('abr') or f.get('tbr') or 0
 
-                if not chosen_format_id:
-                    self.progress.emit(f"{label} ⏭️ Không có bản {target_lang} 1080p, bỏ qua: {url}")
-                    return 'skipped', video
+                    # Audio-only track with target language
+                    if f_vc == 'none' and f_ac != 'none' and f_lang in accept_langs:
+                        if f_abr > best_audio_br:
+                            best_audio_br = f_abr
+                            chosen_audio_id = f_id
 
-                self.progress.emit(
-                    f"{label} 🌐 Tìm thấy {target_lang} ID={chosen_format_id} ({best_height}p) | {date_str} → tải..."
-                )
+                    # Best video track (no language filter — video track is shared)
+                    if f_ac == 'none' and f_vc != 'none' and f_h >= 1080:
+                        is_avc = 'avc1' in f_vc
+                        # Prefer: higher resolution, then AVC codec
+                        if f_h > best_video_h or (f_h == best_video_h and is_avc and not best_video_avc):
+                            best_video_h = f_h
+                            best_video_avc = is_avc
+                            chosen_video_id = f_id
 
-                # Step C: Download with the exact format_id via subprocess
+                # Fallback: if no separate video-only track, find any video track >= 1080
+                if not chosen_video_id:
+                    for f in all_formats:
+                        f_vc = str(f.get('vcodec', 'none') or 'none')
+                        f_h = f.get('height') or 0
+                        f_id = f.get('format_id', '')
+                        if f_vc != 'none' and f_h >= 1080:
+                            is_avc = 'avc1' in f_vc
+                            if f_h > best_video_h or (f_h == best_video_h and is_avc and not best_video_avc):
+                                best_video_h = f_h
+                                best_video_avc = is_avc
+                                chosen_video_id = f_id
+
+                # Determine format string for download
+                if chosen_audio_id and chosen_video_id:
+                    # Best case: video + dubbed audio
+                    fmt_str = f"{chosen_video_id}+{chosen_audio_id}"
+                    self.progress.emit(
+                        f"{label} 🌐 Tìm thấy {target_lang}: video={chosen_video_id} ({best_video_h}p) + audio={chosen_audio_id} ({best_audio_br}kbps) | {date_str} → tải..."
+                    )
+                elif chosen_audio_id:
+                    # Have audio but no 1080p+ video — use best video available + dubbed audio
+                    fmt_str = f"bestvideo+{chosen_audio_id}"
+                    self.progress.emit(
+                        f"{label} 🌐 Tìm thấy {target_lang}: bestvideo + audio={chosen_audio_id} | {date_str} → tải..."
+                    )
+                else:
+                    # No separate audio track found — try combined format with language
+                    combined_id = None
+                    for f in all_formats:
+                        f_lang = str(f.get('language', '') or '').lower()
+                        f_vc = str(f.get('vcodec', 'none') or 'none')
+                        f_ac = str(f.get('acodec', 'none') or 'none')
+                        f_h = f.get('height') or 0
+                        if f_lang in accept_langs and f_vc != 'none' and f_ac != 'none' and f_h >= 1080:
+                            combined_id = f.get('format_id')
+                            break
+
+                    if combined_id:
+                        fmt_str = combined_id
+                        self.progress.emit(
+                            f"{label} 🌐 Tìm thấy {target_lang} (combined): ID={combined_id} | {date_str} → tải..."
+                        )
+                    else:
+                        self.progress.emit(f"{label} ⏭️ Không có bản {target_lang}, bỏ qua: {url}")
+                        return 'skipped', video
+
+                # Step C: Download with the format string via subprocess
                 outtmpl = os.path.join(vid_folder, '%(title)s [%(id)s].%(ext)s')
                 dl_cmd = [ytdlp_exe]
                 if deno_exe:
                     dl_cmd += ['--js-runtimes', f'deno:{deno_exe}']
                 dl_cmd += [
                     '--no-playlist',
-                    '-f', chosen_format_id,
+                    '-f', fmt_str,
                     '--merge-output-format', 'mp4',
                     '-o', outtmpl,
                     '--no-warnings',
                     '--retries', '10',
                     url
                 ]
+                if used_cookies:
+                    dl_cmd.insert(-1, '--cookies-from-browser')
+                    dl_cmd.insert(-1, 'chrome')
                 if ffmpeg_location:
                     dl_cmd += ['--ffmpeg-location', ffmpeg_location]
 
@@ -452,7 +560,10 @@ class DownloaderThread(QThread):
                     _no_window = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
                     dl_result = subprocess.run(dl_cmd, capture_output=True, text=True, timeout=300,
                                               creationflags=_no_window)
-                    # Don't set ok strictly here, we will check the file later
+                    if dl_result.returncode != 0:
+                        err_out = (dl_result.stderr or dl_result.stdout or '').strip()
+                        if err_out:
+                            self.progress.emit(f"{label} ⚠️ yt-dlp stderr: {err_out[:200]}")
                 except subprocess.TimeoutExpired:
                     self.progress.emit(f"{label} ❌ Timeout khi tải: {url}")
                 except Exception as e:
@@ -463,12 +574,28 @@ class DownloaderThread(QThread):
                 self.progress.emit(f"{label} ⬇️ Bắt đầu tải: {url} | Ngày đăng: {date_str}")
                 dl_opts = self.downloader._build_ydl_opts(vid_folder, ffmpeg_location, language=None)
                 dl_opts['noprogress'] = True
+                dl_opts['ignoreerrors'] = False
+                dl_ok = False
                 try:
+                    import yt_dlp
                     with yt_dlp.YoutubeDL(dl_opts) as dl_ydl:
-                        dl_ydl.download([url])
+                        ret_code = dl_ydl.download([url])
+                        if ret_code == 0:
+                            dl_ok = True
                 except Exception as e:
-                    err_type = type(e).__name__
-                    self.progress.emit(f"{label} ⚠️ Lỗi khi tải [{err_type}]: {str(e)}")
+                    pass
+
+                if not dl_ok:
+                    try:
+                        _no_win = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
+                        _outtmpl = os.path.join(vid_folder, '%(title)s [%(id)s].%(ext)s')
+                        _cmd = [ytdlp_exe, '--no-playlist', '-f', dl_opts['format'], '--merge-output-format', 'mp4', '-o', _outtmpl, '--no-warnings', '--retries', '10']
+                        if ffmpeg_location:
+                            _cmd += ['--ffmpeg-location', ffmpeg_location]
+                        _cmd.append(url)
+                        subprocess.run(_cmd, capture_output=True, text=True, timeout=300, creationflags=_no_win)
+                    except Exception as _e2:
+                        self.progress.emit(f"{label} ⚠️ Lỗi khi tải: {_e2}")
 
                 
             if not self.is_running:

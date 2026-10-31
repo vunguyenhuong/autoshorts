@@ -4,3 +4,13 @@ yt-dlp
 Pillow
 requests
 selenium
+scenedetect
+opencv-python
+scikit-image
+# Auto Subtitle — speech recognition
+faster-whisper
+# Voice Clone & Voice Conversion
+numpy
+scipy
+# Optional: PyTorch CUDA (recommended for GTX 1050 Ti) & RVC
+# pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu124

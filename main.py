@@ -7,6 +7,13 @@ from ui.main_window import MainWindow
 import ui.theme as theme
 
 
+def exception_hook(exctype, value, traceback):
+    print("⚠️ Unhandled exception caught:", exctype, value)
+    sys.__excepthook__(exctype, value, traceback)
+
+sys.excepthook = exception_hook
+
+
 def main():
     if hasattr(Qt, 'AA_EnableHighDpiScaling'):
         QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)

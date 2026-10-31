@@ -261,22 +261,20 @@ class ShortsDownloader:
         """Locate yt-dlp.exe in settings folder"""
         if getattr(sys, 'frozen', False):
             base_cwd = os.path.dirname(sys.executable)
-            # Prioritize settings folder
-            candidates = [
-                os.path.join(base_cwd, 'settings', 'yt-dlp.exe'),
-                os.path.join(base_cwd, 'yt-dlp.exe'),
-            ]
-            for c in candidates:
-                if os.path.exists(c):
-                    return c
-            return "yt-dlp"
         else:
-            # Check current dir or settings dir
-            if os.path.exists("settings/yt-dlp.exe"):
-                 return os.path.abspath("settings/yt-dlp.exe")
-            if os.path.exists("yt-dlp.exe"):
-                return os.path.abspath("yt-dlp.exe")
-            return "yt-dlp"
+            base_cwd = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        candidates = [
+            os.path.join(base_cwd, 'settings', 'yt-dlp.exe'),
+            os.path.join(base_cwd, 'yt-dlp.exe'),
+        ]
+        for c in candidates:
+            if os.path.exists(c):
+                return c
+        if os.path.exists("settings/yt-dlp.exe"):
+            return os.path.abspath("settings/yt-dlp.exe")
+        if os.path.exists("yt-dlp.exe"):
+            return os.path.abspath("yt-dlp.exe")
+        return "yt-dlp"
 
     def _find_ffmpeg(self):
         """Return the ffmpeg directory path, or None if not found."""
@@ -314,9 +312,10 @@ class ShortsDownloader:
         # Use -j to get JSON metadata
         cmd = [ytdlp_exe, '--no-playlist', '--quiet', '--no-warnings', '-j', video_url]
         
-        # Also try to use deno if available
-        MD_DENO = r'C:/Users/Vu Nguyen Huong/AppData/Roaming/media-downloader/bin/deno.exe'
-        if os.path.exists(MD_DENO):
+        # Also try to use deno if available (dynamic path)
+        appdata = os.environ.get('APPDATA', '')
+        MD_DENO = os.path.join(appdata, 'media-downloader', 'bin', 'deno.exe') if appdata else ''
+        if MD_DENO and os.path.exists(MD_DENO):
             cmd.insert(1, '--js-runtimes')
             cmd.insert(2, f'deno:{MD_DENO}')
             
@@ -345,28 +344,28 @@ class ShortsDownloader:
 
     def check_channel(self, channel_url, limit=None):
         """
-        Fetches the list of Shorts from the channel using yt_dlp library.
+        Fetches the list of Shorts/Videos from the channel using yt_dlp library
+        (with fallback to yt-dlp.exe subprocess).
         """
-        import yt_dlp
-        
-        ydl_opts = {
-            'extract_flat': True,
-            'quiet': True,
-            'no_warnings': True,
-            'ignoreerrors': True,
-            'http_headers': {
-                'User-Agent': 'Mozilla/5.0'
-            },
-        }
-
-        if limit and limit > 0:
-            ydl_opts['playlistend'] = limit
-            
+        results = []
         try:
+            import yt_dlp
+            ydl_opts = {
+                'extract_flat': True,
+                'quiet': True,
+                'no_warnings': True,
+                'ignoreerrors': True,
+                'http_headers': {
+                    'User-Agent': 'Mozilla/5.0'
+                },
+            }
+
+            if limit and limit > 0:
+                ydl_opts['playlistend'] = limit
+
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 data = ydl.extract_info(channel_url, download=False)
-                
-            results = []
+
             if data and 'entries' in data:
                 for entry in data['entries']:
                     if entry:
@@ -379,28 +378,65 @@ class ShortsDownloader:
                             'upload_date': entry.get('upload_date'),  # format: YYYYMMDD or None
                             'timestamp': entry.get('timestamp'),      # unix timestamp or None
                         })
-            return results
-            
+            if results:
+                return results
         except Exception as e:
-            print(f"Error fetching channel: {e}")
-            return []
+            print(f"Error fetching channel via yt_dlp module ({e}), trying yt-dlp.exe fallback...")
+
+        try:
+            ytdlp_exe = self.get_ytdlp_exe()
+            cmd = [
+                ytdlp_exe,
+                '--flat-playlist',
+                '--dump-single-json',
+                '--no-warnings',
+                '--ignore-errors',
+            ]
+            if limit and limit > 0:
+                cmd += ['--playlist-end', str(limit)]
+            cmd.append(channel_url)
+
+            kwargs = {'capture_output': True, 'text': True, 'timeout': 120, 'encoding': 'utf-8'}
+            if os.name == 'nt':
+                kwargs['creationflags'] = subprocess.CREATE_NO_WINDOW
+            res = subprocess.run(cmd, **kwargs)
+            if res.stdout:
+                lines = [l for l in res.stdout.strip().splitlines() if l.strip().startswith('{')]
+                if lines:
+                    data = json.loads(lines[-1])
+                    if data and 'entries' in data:
+                        for entry in data['entries']:
+                            if entry:
+                                results.append({
+                                    'id': entry.get('id'),
+                                    'title': entry.get('title'),
+                                    'url': entry.get('url') or f"https://www.youtube.com/watch?v={entry.get('id')}",
+                                    'duration': entry.get('duration'),
+                                    'view_count': entry.get('view_count', 0),
+                                    'upload_date': entry.get('upload_date'),
+                                    'timestamp': entry.get('timestamp'),
+                                })
+        except Exception as e:
+            print(f"Error fetching channel via yt-dlp.exe: {e}")
+
+        return results
 
     def get_video_info(self, video_url):
         """
-        Fetches metadata for a single video using yt_dlp.
+        Fetches metadata for a single video using yt_dlp (with yt-dlp.exe fallback).
         Returns a dict with video details, including channel_url and view_count.
         """
-        import yt_dlp
-        ydl_opts = {
-            'extract_flat': True,
-            'quiet': True,
-            'no_warnings': True,
-            'ignoreerrors': True,
-            'http_headers': {
-                'User-Agent': 'Mozilla/5.0'
-            },
-        }
         try:
+            import yt_dlp
+            ydl_opts = {
+                'extract_flat': True,
+                'quiet': True,
+                'no_warnings': True,
+                'ignoreerrors': True,
+                'http_headers': {
+                    'User-Agent': 'Mozilla/5.0'
+                },
+            }
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(video_url, download=False)
                 if info:
@@ -416,7 +452,33 @@ class ShortsDownloader:
                         'channel': info.get('channel') or info.get('uploader')
                     }
         except Exception as e:
-            print(f"Error fetching video info: {e}")
+            print(f"Error fetching video info via yt_dlp module ({e}), trying yt-dlp.exe fallback...")
+
+        try:
+            ytdlp_exe = self.get_ytdlp_exe()
+            cmd = [ytdlp_exe, '--no-playlist', '--dump-single-json', '--no-warnings', video_url]
+            kwargs = {'capture_output': True, 'text': True, 'timeout': 60, 'encoding': 'utf-8'}
+            if os.name == 'nt':
+                kwargs['creationflags'] = subprocess.CREATE_NO_WINDOW
+            res = subprocess.run(cmd, **kwargs)
+            if res.stdout:
+                lines = [l for l in res.stdout.strip().splitlines() if l.strip().startswith('{')]
+                if lines:
+                    info = json.loads(lines[-1])
+                    if info:
+                        return {
+                            'id': info.get('id'),
+                            'title': info.get('title'),
+                            'url': info.get('url') or video_url,
+                            'duration': info.get('duration'),
+                            'view_count': info.get('view_count', 0),
+                            'upload_date': info.get('upload_date'),
+                            'timestamp': info.get('timestamp'),
+                            'channel_url': info.get('uploader_url') or info.get('channel_url') or info.get('uploader_id'),
+                            'channel': info.get('channel') or info.get('uploader')
+                        }
+        except Exception as e:
+            print(f"Error fetching video info via yt-dlp.exe: {e}")
         return None
 
     def download_videos(self, video_urls, download_path, channel_url=None, skip_downloaded=True, progress_hook=None, logger=None):
@@ -569,12 +631,6 @@ class ShortsDownloader:
                 'ffmpeg': ['-c', 'copy'],
             },
 
-            # android_vr client: provides 1080p H.264 without PO Token
-            'extractor_args': {
-                'youtube': {
-                    'player_client': ['android_vr']
-                }
-            },
             'http_headers': {
                 'User-Agent': 'Mozilla/5.0'
             },
@@ -582,7 +638,7 @@ class ShortsDownloader:
             # Reliability settings
             'retries': 10,
             'fragment_retries': 10,
-            'ignoreerrors': True,
+            'ignoreerrors': False,
             'no_warnings': True,
             'quiet': True,
             'noprogress': True,
@@ -652,4 +708,3 @@ class ShortsDownloader:
                             logger.warning(f"⚠️ Không xóa được {fname}: {e}")
         except Exception:
             pass
-

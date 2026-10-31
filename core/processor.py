@@ -6,8 +6,8 @@ import subprocess
 import time
 import threading
 
-# Global semaphore to limit concurrent NVENC sessions (consumer GPUs allow max 2-3)
-_nvenc_semaphore = threading.Semaphore(2)
+# Global semaphore to limit concurrent NVENC sessions (GTX 1080 8GB supports 3-5 concurrent streams)
+_nvenc_semaphore = threading.Semaphore(3)
 
 # Thread-safe counter for date-based naming across concurrent renders
 _date_naming_lock = threading.Lock()
@@ -242,6 +242,7 @@ class ShortsProcessor:
 
             # 1. First pass: Filter and get effective durations
             video_pool = []
+            trim_mode = settings.get('trim_mode', 'none')
             for f_path in files:
                 try:
                     dur = self.get_video_duration_fast(f_path)
@@ -256,6 +257,25 @@ class ShortsProcessor:
                         if dur >= 60 and duration_mode != 'free' and (trim_long_videos or not skip_merge):
                             dur = 45.0  # Estimation average for trimmed videos
                         
+                        # Apply user trim settings to estimation
+                        if trim_mode == 'head_tail':
+                            trim_head = float(settings.get('trim_head', 0.0))
+                            trim_tail = float(settings.get('trim_tail', 0.0))
+                            dur = max(1.0, dur - trim_head - trim_tail)
+                        elif trim_mode == 'range':
+                            trim_from = float(settings.get('trim_from', 0.0))
+                            trim_to = float(settings.get('trim_to', 0.0))
+                            if trim_to > trim_from:
+                                dur = trim_to - trim_from
+                            else:
+                                dur = max(1.0, dur - trim_from)
+                        elif trim_mode == 'skip_segment':
+                            skip_from = float(settings.get('skip_from', 0.0))
+                            skip_to = float(settings.get('skip_to', 0.0))
+                            if skip_to > skip_from >= 0:
+                                skip_to = min(skip_to, dur)
+                                dur = max(1.0, skip_from + (dur - skip_to))
+                        
                         eff_dur = dur / speed
                         video_pool.append(eff_dur)
                 except:
@@ -265,7 +285,14 @@ class ShortsProcessor:
             if skip_merge:
                 return valid_files_count, valid_files_count
 
-            # 2. Second pass: Simulated greedy batching
+            # 2a. Free mode: merge exactly min_videos videos per clip (no duration limit)
+            if duration_mode == 'free':
+                if min_videos < 1:
+                    return 0, valid_files_count
+                est_count = valid_files_count // min_videos
+                return est_count, valid_files_count
+
+            # 2b. Standard: Simulated greedy batching by duration
             est_count = 0
             # Work on a copy of the pool
             pool = video_pool.copy()
@@ -333,6 +360,11 @@ class ShortsProcessor:
         # Filtering logic for individual videos
         only_under_1min = settings.get('only_under_1min', False)
         trim_long_videos = settings.get('trim_long_videos', False)
+        max_input_duration = float(settings.get('max_input_duration', 0) or 0)
+        speed = float(settings.get('speed', 1.0))
+        # trim_dur là thời lượng input (trước khi áp speed).
+        # Để output đúng = max_input_duration giây, cần trim input = max_input_duration * speed.
+        max_trim_input = max_input_duration * speed if max_input_duration > 0 else 0
         
         video_pool = []
         discarded_videos = []
@@ -350,11 +382,25 @@ class ShortsProcessor:
                         progress_callback(f"⏭️ Loại bỏ video >= 60s: {os.path.basename(f)}")
                 elif trim_long_videos and dur >= 60:
                     trim_dur = random.uniform(30.0, 55.0)
-                    video_pool.append({"path": f, "dur": trim_dur, "trim_dur": trim_dur, "original_dur": dur})
+                    item = {"path": f, "dur": trim_dur, "trim_dur": trim_dur, "original_dur": dur}
+                    item = self._apply_trim_settings(item, dur, settings)
+                    # Apply max_trim_input on top if set and stricter
+                    if max_trim_input > 0 and item.get('trim_dur', trim_dur) > max_trim_input:
+                        item['trim_dur'] = max_trim_input
+                        item['dur'] = max_trim_input
+                    video_pool.append(item)
                     if progress_callback:
                         progress_callback(f"✂️ Cắt ngẫu nhiên đuôi video dài {dur:.1f}s giữ lại {trim_dur:.1f}s: {os.path.basename(f)}")
                 else:
-                    video_pool.append({"path": f, "dur": dur})
+                    item = {"path": f, "dur": dur}
+                    item = self._apply_trim_settings(item, dur, settings)
+                    # Apply max_trim_input if set and video is longer
+                    if max_trim_input > 0 and dur > max_trim_input:
+                        item['trim_dur'] = max_trim_input
+                        item['dur'] = max_trim_input
+                        if progress_callback:
+                            progress_callback(f"✂️ Cắt video {dur:.1f}s → {max_input_duration:.0f}s output (max đầu vào): {os.path.basename(f)}")
+                    video_pool.append(item)
             
             # Move discarded others if any
             if discarded_videos:
@@ -362,7 +408,18 @@ class ShortsProcessor:
             
             files = video_pool
         else:
-            files = [{"path": f, "dur": self.get_video_duration_fast(f)} for f in files]
+            files = []
+            for f in self.scan_folder(source_folder, sort_by_views=False):
+                dur = self.get_video_duration_fast(f)
+                item = {"path": f, "dur": dur}
+                item = self._apply_trim_settings(item, dur, settings)
+                # Apply max_trim_input if set and video is longer
+                if max_trim_input > 0 and dur > max_trim_input:
+                    item['trim_dur'] = max_trim_input
+                    item['dur'] = max_trim_input
+                    if progress_callback:
+                        progress_callback(f"✂️ Cắt video {dur:.1f}s → {max_input_duration:.0f}s output (max đầu vào): {os.path.basename(f)}")
+                files.append(item)
         
         if not files:
             if progress_callback: progress_callback("No valid videos found after filtering.")
@@ -484,11 +541,15 @@ class ShortsProcessor:
                 # In 'free' mode: never auto-trim long videos. Keep original duration.
                 if dur >= 60 and duration_mode != 'free' and (trim_long_videos or not skip_merge):
                     trim_dur = random.uniform(30.0, 55.0)
-                    video_pool.append({"path": f, "dur": trim_dur, "trim_dur": trim_dur, "original_dur": dur})
+                    item = {"path": f, "dur": trim_dur, "trim_dur": trim_dur, "original_dur": dur}
+                    item = self._apply_trim_settings(item, dur, settings)
+                    video_pool.append(item)
                     if progress_callback:
                         progress_callback(f"✂️ Cắt ngẫu nhiên đuôi video dài {dur:.1f}s giữ lại {trim_dur:.1f}s: {os.path.basename(f)}")
                 else:
-                    video_pool.append({"path": f, "dur": dur})
+                    item = {"path": f, "dur": dur}
+                    item = self._apply_trim_settings(item, dur, settings)
+                    video_pool.append(item)
         
         if not video_pool:
             if progress_callback: progress_callback("No valid videos found after filtering.")
@@ -501,78 +562,110 @@ class ShortsProcessor:
             progress_callback(f"✅ Đã nhận {len(video_pool)} video hợp lệ sau khi lọc")
 
         batches_to_render = []
-        while video_pool:
-            if check_cancel and check_cancel(): return
 
-            current_batch_files = []
-            current_duration = 0.0
-            
-            # 1. Select clips for this batch
-            pool_idx = 0
-            while pool_idx < len(video_pool):
+        # ── FREE MODE: merge exactly min_videos videos per clip ─────────────────
+        if duration_mode == 'free':
+            if min_videos < 1:
+                if progress_callback:
+                    progress_callback("⚠️ Số video gộp phải >= 1, bỏ qua.")
+                return
+
+            if progress_callback:
+                progress_callback(
+                    f"🔗 Gộp thường (không cắt): mỗi clip ghép đúng {min_videos} video."
+                )
+
+            # Split pool into fixed-size batches of min_videos
+            i = 0
+            while i + min_videos <= len(video_pool):
                 if check_cancel and check_cancel(): return
+                batch = video_pool[i:i + min_videos]
+                batches_to_render.append((batch_idx, batch))
+                batch_idx += 1
+                i += min_videos
+
+            # Remaining videos (< min_videos) go to discarded
+            remainder = video_pool[i:]
+            if remainder:
+                discarded_videos.extend(remainder)
+                if progress_callback:
+                    progress_callback(
+                        f"📦 {len(remainder)} video thừa (không đủ {min_videos}) → unused_videos."
+                    )
+
+        # ── STANDARD MODE: greedy batching by target duration ────────────────────
+        else:
+            while video_pool:
+                if check_cancel and check_cancel(): return
+
+                current_batch_files = []
+                current_duration = 0.0
                 
-                f_item = video_pool[pool_idx]
-                try:
-                    f_path = f_item['path'] if isinstance(f_item, dict) else f_item
-                    dur = f_item['dur'] if isinstance(f_item, dict) else self.get_video_duration_fast(f_path)
+                # 1. Select clips for this batch
+                pool_idx = 0
+                while pool_idx < len(video_pool):
+                    if check_cancel and check_cancel(): return
                     
-                    # Apply speed to get effective duration
-                    eff_speed = settings.get('speed', 1.0)
-                    eff_dur = dur / eff_speed
-                    
-                    # Check selection limits
-                    if duration_mode == 'max':
-                        # Mode: Under 1 minute (hard limit 59.9s)
-                        if (current_duration + eff_dur) > 59.9:
-                            pool_idx += 1
-                            continue
-                    # In 'free' mode: no upper cap, just fill until target_duration is hit
-                    
-                    # Add the video to batch
-                    current_batch_files.append(f_item)
-                    current_duration += eff_dur
-                    video_pool.pop(pool_idx)
-                    
-                    if progress_callback: 
-                        progress_callback(f"Adding to Video {batch_idx}: {os.path.basename(f_path)} (Total: {current_duration:.1f}s)")
-                    
-                    # Stop if reached target
-                    if current_duration >= target_duration and len(current_batch_files) >= min_videos:
-                        if progress_callback:
-                            progress_callback(f"Batch {batch_idx} complete at {current_duration:.1f}s")
-                        break
+                    f_item = video_pool[pool_idx]
+                    try:
+                        f_path = f_item['path'] if isinstance(f_item, dict) else f_item
+                        dur = f_item['dur'] if isinstance(f_item, dict) else self.get_video_duration_fast(f_path)
                         
-                except Exception as e:
-                    err_path = f_item['path'] if isinstance(f_item, dict) else f_item
-                    if progress_callback: progress_callback(f"Error reading {os.path.basename(err_path)}: {e}")
-                    video_pool.pop(pool_idx) # Skip bad file
+                        # Apply speed to get effective duration
+                        eff_speed = settings.get('speed', 1.0)
+                        eff_dur = dur / eff_speed
+                        
+                        # Check selection limits
+                        if duration_mode == 'max':
+                            # Mode: Under 1 minute (hard limit 59.9s)
+                            if (current_duration + eff_dur) > 59.9:
+                                pool_idx += 1
+                                continue
+                        
+                        # Add the video to batch
+                        current_batch_files.append(f_item)
+                        current_duration += eff_dur
+                        video_pool.pop(pool_idx)
+                        
+                        if progress_callback: 
+                            progress_callback(f"Adding to Video {batch_idx}: {os.path.basename(f_path)} (Total: {current_duration:.1f}s)")
+                        
+                        # Stop if reached target
+                        if current_duration >= target_duration and len(current_batch_files) >= min_videos:
+                            if progress_callback:
+                                progress_callback(f"Batch {batch_idx} complete at {current_duration:.1f}s")
+                            break
+                            
+                    except Exception as e:
+                        err_path = f_item['path'] if isinstance(f_item, dict) else f_item
+                        if progress_callback: progress_callback(f"Error reading {os.path.basename(err_path)}: {e}")
+                        video_pool.pop(pool_idx) # Skip bad file
 
-            # Check if we actually added any videos to this batch
-            if not current_batch_files:
-                # No combinations found - we're done
-                if progress_callback: 
-                    progress_callback(f"No more valid combinations found.")
-                break
-            
-            # Check if batch meets minimum requirement
-            # Accept batches that are at least 30 seconds OR 40% of target (whichever is lower)
-            min_required = min(30, target_duration * 0.4)
-            
-            if current_duration < min_required or len(current_batch_files) < min_videos:
-                if progress_callback: 
-                    reason = f"only {current_duration:.1f}s (need {min_required:.0f}s)"
-                    if len(current_batch_files) < min_videos:
-                        reason = f"only {len(current_batch_files)} videos (requires {min_videos})"
-                    progress_callback(f"Last batch failed: {reason}. Skipping first video.")
-                # Discard first video and return others to pool
-                first_failed = current_batch_files.pop(0)
-                discarded_videos.append(first_failed)
-                video_pool.extend(current_batch_files)
-                continue
+                # Check if we actually added any videos to this batch
+                if not current_batch_files:
+                    # No combinations found - we're done
+                    if progress_callback: 
+                        progress_callback(f"No more valid combinations found.")
+                    break
+                
+                # Check if batch meets minimum requirement
+                # Accept batches that are at least 30 seconds OR 40% of target (whichever is lower)
+                min_required = min(30, target_duration * 0.4)
+                
+                if current_duration < min_required or len(current_batch_files) < min_videos:
+                    if progress_callback: 
+                        reason = f"only {current_duration:.1f}s (need {min_required:.0f}s)"
+                        if len(current_batch_files) < min_videos:
+                            reason = f"only {len(current_batch_files)} videos (requires {min_videos})"
+                        progress_callback(f"Last batch failed: {reason}. Skipping first video.")
+                    # Discard first video and return others to pool
+                    first_failed = current_batch_files.pop(0)
+                    discarded_videos.append(first_failed)
+                    video_pool.extend(current_batch_files)
+                    continue
 
-            batches_to_render.append((batch_idx, current_batch_files))
-            batch_idx += 1
+                batches_to_render.append((batch_idx, current_batch_files))
+                batch_idx += 1
             
         # 2. Render all batches in parallel
         import concurrent.futures
@@ -655,6 +748,65 @@ class ShortsProcessor:
         video_pool.extend(discarded_videos)
         if video_pool:
             self._move_to_unused(source_folder, video_pool, progress_callback)
+
+    def _apply_trim_settings(self, f_item, dur, settings):
+        """
+        Apply trim settings to a video item dict.
+        Returns updated f_item with trim_start and/or trim_dur fields.
+
+        trim_mode: 'none' | 'head_tail' | 'range'
+        - head_tail: trim_head (s from start), trim_tail (s from end)
+        - range:     trim_from (start second), trim_to (end second, 0=until end)
+        """
+        trim_mode = settings.get('trim_mode', 'none')
+        if trim_mode == 'none' or dur <= 0:
+            return f_item
+
+        item = dict(f_item) if isinstance(f_item, dict) else {'path': f_item, 'dur': dur}
+
+        if trim_mode == 'head_tail':
+            trim_head = float(settings.get('trim_head', 0.0))
+            trim_tail = float(settings.get('trim_tail', 0.0))
+            trim_start = max(0.0, trim_head)
+            effective_dur = dur - trim_head - trim_tail
+            if effective_dur <= 0:
+                # If trim removes everything, keep at least 1 second
+                effective_dur = max(1.0, dur - trim_head)
+            item['trim_start'] = trim_start
+            item['trim_dur'] = effective_dur
+            item['dur'] = effective_dur
+
+        elif trim_mode == 'range':
+            trim_from = float(settings.get('trim_from', 0.0))
+            trim_to = float(settings.get('trim_to', 0.0))
+            trim_start = max(0.0, trim_from)
+            if trim_to > trim_start:
+                effective_dur = trim_to - trim_start
+            else:
+                # trim_to == 0 or invalid → keep until end
+                effective_dur = max(1.0, dur - trim_start)
+            item['trim_start'] = trim_start
+            item['trim_dur'] = effective_dur
+            item['dur'] = effective_dur
+
+        elif trim_mode == 'skip_segment':
+            skip_from = float(settings.get('skip_from', 0.0))
+            skip_to = float(settings.get('skip_to', 0.0))
+            # Validate: skip_to must be > skip_from and <= dur
+            if skip_to <= skip_from or skip_from < 0:
+                return item  # Invalid range → do nothing
+            skip_to = min(skip_to, dur)
+            # Effective duration = part before skip + part after skip
+            part1_dur = skip_from          # 0 → skip_from
+            part2_dur = dur - skip_to      # skip_to → end
+            effective_dur = max(1.0, part1_dur + part2_dur)
+            item['skip_from'] = skip_from
+            item['skip_to'] = skip_to
+            item['dur'] = effective_dur
+            # Mark as skip mode so renderer knows to use 2-segment concat
+            item['trim_mode'] = 'skip_segment'
+
+        return item
 
     def _move_to_unused(self, source_folder, video_pool, progress_callback):
         """Helper to move videos to unused category with retry for locked files"""
@@ -747,15 +899,21 @@ class ShortsProcessor:
             )
             enc = result.stdout.lower()
             if 'h264_nvenc' in enc:
-                # Pattern đơn giản hóa, dùng scale_cuda và overlay_cuda
-                self._gpu_cache = {
-                    'encoder':      'h264_nvenc',
-                    'preset_args':  ['-preset', 'p4', '-tune', 'hq'],
-                    'quality_args': ['-cq', '23', '-b:v', '0'],
-                    'hwaccel_args': ['-hwaccel', 'd3d11va', '-hwaccel_output_format', 'd3d11'],
-                    'decoder_arg':  [],
-                    'is_nvidia':    True
-                }
+                probe_cmd = [ffmpeg_exe, '-y', '-hide_banner', '-f', 'lavfi', '-i', 'color=s=64x64:d=0.04', '-c:v', 'h264_nvenc', '-f', 'null', '-']
+                probe_res = subprocess.run(
+                    probe_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    text=True, startupinfo=startupinfo, encoding='utf-8', errors='replace'
+                )
+                if probe_res.returncode == 0:
+                    self._gpu_cache = {
+                        'encoder':      'h264_nvenc',
+                        'preset_args':  ['-preset', 'p4', '-tune', 'hq'],
+                        'quality_args': ['-rc', 'vbr', '-cq', '23', '-b:v', '0'],
+                        'hwaccel_args': [],
+                        'decoder_arg':  [],
+                        'is_nvidia':    True
+                    }
+                    return self._gpu_cache
             elif 'h264_amf' in enc:
                 self._gpu_cache = {
                     'encoder':      'h264_amf',
@@ -899,6 +1057,52 @@ class ShortsProcessor:
             pass
         return 1080, 1920 # Fallback
 
+    def _expand_skip_segments(self, file_paths):
+        """
+        Expand any f_item with trim_mode='skip_segment' into two consecutive f_items:
+          - Part 1: trim_start=0, trim_dur=skip_from  (keeps 0→skip_from)
+          - Part 2: trim_start=skip_to, no trim_dur   (keeps skip_to→end)
+        This allows the normal render pipeline to handle skip_segment transparently.
+        """
+        expanded = []
+        for f_item in file_paths:
+            if not isinstance(f_item, dict):
+                expanded.append(f_item)
+                continue
+            if f_item.get('trim_mode') != 'skip_segment':
+                expanded.append(f_item)
+                continue
+
+            skip_from = f_item.get('skip_from', 0.0)
+            skip_to = f_item.get('skip_to', 0.0)
+            f_path = f_item['path']
+
+            # Part 1: from beginning to skip_from
+            if skip_from > 0:
+                part1 = dict(f_item)
+                part1.pop('trim_mode', None)
+                part1.pop('skip_from', None)
+                part1.pop('skip_to', None)
+                part1['trim_start'] = 0.0
+                part1['trim_dur'] = skip_from
+                part1['dur'] = skip_from
+                expanded.append(part1)
+
+            # Part 2: from skip_to to end
+            part2 = dict(f_item)
+            part2.pop('trim_mode', None)
+            part2.pop('skip_from', None)
+            part2.pop('skip_to', None)
+            part2['trim_start'] = skip_to
+            # No trim_dur → keep until end
+            if 'trim_dur' in part2:
+                del part2['trim_dur']
+            if skip_to > 0:
+                part2['dur'] = max(1.0, f_item.get('dur', 30.0) - skip_from + 1.0)
+            expanded.append(part2)
+
+        return expanded
+
     def render_batch_gpu_ffmpeg(self, file_paths, output_path, settings, progress_callback):
         """
         New GPU-accelerated rendering pipeline using FFmpeg directly in a single-pass command.
@@ -940,6 +1144,9 @@ class ShortsProcessor:
             if progress_callback:
                 progress_callback("🎬 [GPU] Đang khởi tạo bộ trộn video đơn kỳ (Single-pass GPU Merger)...")
             
+            # Expand any skip_segment items into 2 sub-inputs (part1 + part2)
+            file_paths = self._expand_skip_segments(file_paths)
+
             # Check which files have audio
             need_silent_audio = any(not self._has_audio_stream(f['path'] if isinstance(f, dict) else f) for f in file_paths)
             
@@ -951,10 +1158,13 @@ class ShortsProcessor:
             for i, f_item in enumerate(file_paths):
                 f_path = f_item['path'] if isinstance(f_item, dict) else f_item
                 trim_dur = f_item.get('trim_dur', None) if isinstance(f_item, dict) else None
+                trim_start = f_item.get('trim_start', None) if isinstance(f_item, dict) else None
                 
                 # Add probesize and analyzeduration for robust decoding
                 for c in [cmd, cmd_cpu]:
                     c.extend(["-probesize", "50M", "-analyzeduration", "100M"])
+                    if trim_start and trim_start > 0:
+                        c.extend(["-ss", str(trim_start)])
                     if trim_dur:
                         c.extend(["-t", str(trim_dur)])
                     c.extend(["-i", f_path])
@@ -1032,12 +1242,20 @@ class ShortsProcessor:
             
             filter_complex_str = ";".join(filter_complex_parts)
             
+            enc_name = gpu_info.get('encoder', 'h264_nvenc') if gpu_info else 'h264_nvenc'
+            preset_args = gpu_info.get('preset_args', ['-preset', 'p4', '-tune', 'hq']) if gpu_info else ['-preset', 'p4', '-tune', 'hq']
+            quality_args = gpu_info.get('quality_args', ['-rc', 'vbr', '-cq', '23', '-b:v', '0']) if gpu_info else ['-rc', 'vbr', '-cq', '23', '-b:v', '0']
+
             # Complete the GPU command
             cmd.extend([
                 "-filter_complex", filter_complex_str,
                 "-map", "[v]", "-map", "[a]",
-                "-c:v", "h264_nvenc", "-preset", "p6",
+                "-c:v", enc_name,
+                *preset_args,
+                *quality_args,
+                "-pix_fmt", "yuv420p",
                 "-c:a", "aac", "-b:a", "192k",
+                "-movflags", "+faststart",
                 output_path
             ])
             
@@ -1046,15 +1264,17 @@ class ShortsProcessor:
                 "-filter_complex", filter_complex_str,
                 "-map", "[v]", "-map", "[a]",
                 "-c:v", "libx264", "-preset", "fast", "-crf", "20",
+                "-pix_fmt", "yuv420p",
                 "-c:a", "aac", "-b:a", "192k",
+                "-movflags", "+faststart",
                 output_path
             ])
             
             if progress_callback:
-                progress_callback("🚀 [GPU] Đang tiến hành gộp và scale video 1080x1920 (Stretch & Perfect Crop) bằng NVIDIA NVENC...")
+                progress_callback(f"🚀 [GPU] Đang tiến hành gộp và scale video 1080x1920 (Stretch & Perfect Crop) bằng {enc_name}...")
             
             # Use NVENC semaphore to prevent exceeding GPU session limit
-            gpu_acquired = _nvenc_semaphore.acquire(timeout=120)  # Wait up to 2 min for a slot
+            gpu_acquired = _nvenc_semaphore.acquire(timeout=600)  # Wait up to 10 min for a slot
             try:
                 if not gpu_acquired:
                     if progress_callback:
@@ -1147,6 +1367,9 @@ class ShortsProcessor:
             if progress_callback:
                 progress_callback("🎬 [CPU] Đang khởi tạo bộ trộn video (Single-pass CPU Merger)...")
             
+            # Expand any skip_segment items into 2 sub-inputs (part1 + part2)
+            file_paths = self._expand_skip_segments(file_paths)
+
             # Check which files have audio
             need_silent_audio = any(not self._has_audio_stream(f['path'] if isinstance(f, dict) else f) for f in file_paths)
             
@@ -1157,8 +1380,11 @@ class ShortsProcessor:
             for i, f_item in enumerate(file_paths):
                 f_path = f_item['path'] if isinstance(f_item, dict) else f_item
                 trim_dur = f_item.get('trim_dur', None) if isinstance(f_item, dict) else None
+                trim_start = f_item.get('trim_start', None) if isinstance(f_item, dict) else None
                 
                 cmd.extend(["-probesize", "50M", "-analyzeduration", "100M"])
+                if trim_start and trim_start > 0:
+                    cmd.extend(["-ss", str(trim_start)])
                 if trim_dur:
                     cmd.extend(["-t", str(trim_dur)])
                 cmd.extend(["-i", f_path])

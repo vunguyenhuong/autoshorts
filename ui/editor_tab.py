@@ -2,7 +2,7 @@ import os
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
     QLabel, QProgressBar, QDoubleSpinBox, QSpinBox,
-    QFileDialog, QGroupBox, QMessageBox, QCheckBox, QRadioButton, QColorDialog, QSlider, QScrollArea, QLineEdit, QComboBox, QButtonGroup
+    QFileDialog, QGroupBox, QMessageBox, QCheckBox, QRadioButton, QColorDialog, QSlider, QScrollArea, QLineEdit, QComboBox, QButtonGroup, QFormLayout, QSizePolicy
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
 from PyQt6.QtGui import QColor
@@ -224,7 +224,7 @@ class EditorTaskWidget(QGroupBox):
         if self.param_callback:
             self.param_callback()
 
-    def set_estimation(self, estimated, video_count, skip_merge, target_duration):
+    def set_estimation(self, estimated, video_count, skip_merge, target_duration, is_free_mode=False, merge_count=2):
         if estimated == -1:
             self.est_label.setText("⚠️ Thư mục Nguồn Lỗi hoặc Trống")
         else:
@@ -233,6 +233,16 @@ class EditorTaskWidget(QGroupBox):
                     self.est_label.setText(f"📊 {video_count} video Nguồn -> Edit tách lẻ {video_count} video output.")
                 else:
                     self.est_label.setText("⚠️ Không tìm thấy file video hợp lệ.")
+            elif is_free_mode:
+                if estimated > 0:
+                    remainder = video_count - estimated * merge_count
+                    rem_str = f" ({remainder} video thừa → unused)" if remainder > 0 else ""
+                    self.est_label.setText(
+                        f"📊 {video_count} video Nguồn → Gộp thành {estimated} clip "
+                        f"(mỗi clip = {merge_count} video){rem_str}."
+                    )
+                else:
+                    self.est_label.setText(f"⚠️ {video_count} video Nguồn → Không đủ để gộp (cần ít nhất {merge_count} video).")
             else:
                 if estimated > 0:
                     self.est_label.setText(f"📊 {video_count} video Nguồn -> Dự kiến ghép thành {estimated} clip dài (~{target_duration}s).")
@@ -261,7 +271,7 @@ class EditorTab(QWidget):
         # Overlay Settings
         self.overlay_color = (0, 0, 0)
         self.overlay_opacity = 0
-        
+
         # Debounce timer for estimation updates
         self.estimation_timer = QTimer()
         self.estimation_timer.setSingleShot(True)
@@ -394,6 +404,24 @@ class EditorTab(QWidget):
         only_under_1min_layout.addWidget(self.trim_long_videos_checkbox)
         
         param_layout.addLayout(only_under_1min_layout)
+
+        # Max input duration (cho Edit lẻ)
+        max_dur_layout = QVBoxLayout()
+        max_dur_label = QLabel("Max đầu vào (s)")
+        max_dur_label.setToolTip("Cắt mỗi video xuống tối đa số giây này trước khi xử lý (Edit lẻ). 0 = không giới hạn.")
+        max_dur_layout.addWidget(max_dur_label)
+        self.max_input_duration_spin = QSpinBox()
+        self.max_input_duration_spin.setRange(0, 3600)
+        self.max_input_duration_spin.setValue(0)
+        self.max_input_duration_spin.setSpecialValueText("Không giới hạn")
+        self.max_input_duration_spin.setToolTip(
+            "Nếu video dài hơn số giây này, sẽ tự động cắt bớt phần cuối.\n"
+            "Ví dụ: nhập 59 → mọi video > 59s sẽ bị cắt còn 59s.\n"
+            "0 = không giới hạn."
+        )
+        self.max_input_duration_spin.setFixedWidth(110)
+        max_dur_layout.addWidget(self.max_input_duration_spin)
+        param_layout.addLayout(max_dur_layout)
         
         # Target Duration
         self.duration_container = QWidget()
@@ -420,7 +448,144 @@ class EditorTab(QWidget):
         param_layout.addWidget(self.duration_container)
         param_group.setLayout(param_layout)
         layout.addWidget(param_group)
-        
+
+        # -- Trim Video --
+        trim_group = QGroupBox("✂️ Cắt Video (Trim)")
+        trim_main_layout = QVBoxLayout()
+        trim_main_layout.setSpacing(6)
+        trim_main_layout.setContentsMargins(8, 10, 8, 8)
+
+        # Mode row
+        trim_mode_row = QHBoxLayout()
+        trim_mode_row.addWidget(QLabel("Chế độ cắt:"))
+        self.trim_mode_group = QButtonGroup(self)
+        self.trim_mode_none = QRadioButton("Không cắt")
+        self.trim_mode_none.setChecked(True)
+        self.trim_mode_head_tail = QRadioButton("Cắt đầu / Cắt cuối")
+        self.trim_mode_head_tail.setToolTip("Cắt N giây từ đầu và/hoặc cuối mỗi video")
+        self.trim_mode_range = QRadioButton("Cắt theo khoảng (Range)")
+        self.trim_mode_range.setToolTip("Chỉ giữ lại đoạn từ giây X đến giây Y trong mỗi video")
+        self.trim_mode_skip = QRadioButton("Bỏ qua đoạn (Skip Segment)")
+        self.trim_mode_skip.setToolTip("Loại bỏ một đoạn giữa video: giữ phần trước + phần sau đoạn bị cắt")
+        self.trim_mode_group.addButton(self.trim_mode_none, 0)
+        self.trim_mode_group.addButton(self.trim_mode_head_tail, 1)
+        self.trim_mode_group.addButton(self.trim_mode_range, 2)
+        self.trim_mode_group.addButton(self.trim_mode_skip, 3)
+        trim_mode_row.addWidget(self.trim_mode_none)
+        trim_mode_row.addSpacing(12)
+        trim_mode_row.addWidget(self.trim_mode_head_tail)
+        trim_mode_row.addSpacing(12)
+        trim_mode_row.addWidget(self.trim_mode_range)
+        trim_mode_row.addSpacing(12)
+        trim_mode_row.addWidget(self.trim_mode_skip)
+        trim_mode_row.addStretch()
+        trim_main_layout.addLayout(trim_mode_row)
+
+        # Head-Tail controls (shown when head_tail mode)
+        self.trim_head_tail_widget = QWidget()
+        trim_ht_layout = QHBoxLayout(self.trim_head_tail_widget)
+        trim_ht_layout.setContentsMargins(0, 0, 0, 0)
+        trim_ht_layout.setSpacing(12)
+        trim_ht_layout.addWidget(QLabel("✂ Cắt đầu (giây):"))
+        self.trim_head_spin = QDoubleSpinBox()
+        self.trim_head_spin.setRange(0.0, 300.0)
+        self.trim_head_spin.setSingleStep(0.5)
+        self.trim_head_spin.setValue(0.0)
+        self.trim_head_spin.setFixedWidth(80)
+        self.trim_head_spin.setToolTip("Cắt N giây đầu của mỗi video")
+        trim_ht_layout.addWidget(self.trim_head_spin)
+        trim_ht_layout.addSpacing(20)
+        trim_ht_layout.addWidget(QLabel("✂ Cắt cuối (giây):"))
+        self.trim_tail_spin = QDoubleSpinBox()
+        self.trim_tail_spin.setRange(0.0, 300.0)
+        self.trim_tail_spin.setSingleStep(0.5)
+        self.trim_tail_spin.setValue(0.0)
+        self.trim_tail_spin.setFixedWidth(80)
+        self.trim_tail_spin.setToolTip("Cắt N giây cuối của mỗi video")
+        trim_ht_layout.addWidget(self.trim_tail_spin)
+        trim_ht_layout.addStretch()
+        self.trim_head_tail_widget.setVisible(False)
+        trim_main_layout.addWidget(self.trim_head_tail_widget)
+
+        # Range controls (shown when range mode)
+        self.trim_range_widget = QWidget()
+        trim_range_layout = QHBoxLayout(self.trim_range_widget)
+        trim_range_layout.setContentsMargins(0, 0, 0, 0)
+        trim_range_layout.setSpacing(12)
+        trim_range_layout.addWidget(QLabel("▶ Từ giây:"))
+        self.trim_from_spin = QDoubleSpinBox()
+        self.trim_from_spin.setRange(0.0, 9999.0)
+        self.trim_from_spin.setSingleStep(0.5)
+        self.trim_from_spin.setValue(0.0)
+        self.trim_from_spin.setFixedWidth(90)
+        self.trim_from_spin.setToolTip("Bắt đầu giữ video từ giây này")
+        trim_range_layout.addWidget(self.trim_from_spin)
+        trim_range_layout.addSpacing(20)
+        trim_range_layout.addWidget(QLabel("⏹ Đến giây:"))
+        self.trim_to_spin = QDoubleSpinBox()
+        self.trim_to_spin.setRange(0.0, 9999.0)
+        self.trim_to_spin.setSingleStep(0.5)
+        self.trim_to_spin.setValue(0.0)
+        self.trim_to_spin.setFixedWidth(90)
+        self.trim_to_spin.setToolTip("Dừng ở giây này (nhập 0 = giữ đến hết video)")
+        trim_range_layout.addWidget(self.trim_to_spin)
+        trim_range_hint = QLabel("  \u26a1 Đến giây = 0 → giữ đến hết video")
+        trim_range_hint.setStyleSheet("color: #64748B; font-size: 11px; background: transparent; border: none;")
+        trim_range_layout.addWidget(trim_range_hint)
+        trim_range_layout.addStretch()
+        self.trim_range_widget.setVisible(False)
+        trim_main_layout.addWidget(self.trim_range_widget)
+
+        # Skip Segment controls (shown when skip_segment mode)
+        self.trim_skip_widget = QWidget()
+        trim_skip_layout = QHBoxLayout(self.trim_skip_widget)
+        trim_skip_layout.setContentsMargins(0, 0, 0, 0)
+        trim_skip_layout.setSpacing(12)
+        trim_skip_layout.addWidget(QLabel("\u26d4 Bỏ qua từ giây:"))
+        self.skip_from_spin = QDoubleSpinBox()
+        self.skip_from_spin.setRange(0.0, 9999.0)
+        self.skip_from_spin.setSingleStep(0.5)
+        self.skip_from_spin.setValue(0.0)
+        self.skip_from_spin.setFixedWidth(90)
+        self.skip_from_spin.setToolTip("Bắt đầu bỏ qua ở giây này")
+        trim_skip_layout.addWidget(self.skip_from_spin)
+        trim_skip_layout.addSpacing(20)
+        trim_skip_layout.addWidget(QLabel("den giay:"))
+        self.skip_to_spin = QDoubleSpinBox()
+        self.skip_to_spin.setRange(0.0, 9999.0)
+        self.skip_to_spin.setSingleStep(0.5)
+        self.skip_to_spin.setValue(0.0)
+        self.skip_to_spin.setFixedWidth(90)
+        self.skip_to_spin.setToolTip("Kết thúc bỏ qua ở giây này (0 = đến hết video, nên nhập > 0)")
+        trim_skip_layout.addWidget(self.skip_to_spin)
+        skip_hint = QLabel("  \u26a1 Phần trước + phần sau sẽ được nối lại tự động")
+        skip_hint.setStyleSheet("color: #64748B; font-size: 11px; background: transparent; border: none;")
+        trim_skip_layout.addWidget(skip_hint)
+        trim_skip_layout.addStretch()
+        self.trim_skip_widget.setVisible(False)
+        trim_main_layout.addWidget(self.trim_skip_widget)
+
+        trim_group.setLayout(trim_main_layout)
+        layout.addWidget(trim_group)
+
+        # Connect mode toggles → show/hide + re-estimate
+        self.trim_mode_none.toggled.connect(self._on_trim_mode_changed)
+        self.trim_mode_head_tail.toggled.connect(self._on_trim_mode_changed)
+        self.trim_mode_range.toggled.connect(self._on_trim_mode_changed)
+        self.trim_mode_skip.toggled.connect(self._on_trim_mode_changed)
+
+        # Connect spinboxes → re-estimate on value change
+        self.trim_mode_none.toggled.connect(self.update_estimation_debounced)
+        self.trim_mode_head_tail.toggled.connect(self.update_estimation_debounced)
+        self.trim_mode_range.toggled.connect(self.update_estimation_debounced)
+        self.trim_mode_skip.toggled.connect(self.update_estimation_debounced)
+        self.trim_head_spin.valueChanged.connect(self.update_estimation_debounced)
+        self.trim_tail_spin.valueChanged.connect(self.update_estimation_debounced)
+        self.trim_from_spin.valueChanged.connect(self.update_estimation_debounced)
+        self.trim_to_spin.valueChanged.connect(self.update_estimation_debounced)
+        self.skip_from_spin.valueChanged.connect(self.update_estimation_debounced)
+        self.skip_to_spin.valueChanged.connect(self.update_estimation_debounced)
+
         # -- Anti-Detect (Bypass TikTok) --
         anti_detect_group = QGroupBox("Hiệu ứng")
         anti_detect_layout = QHBoxLayout()
@@ -530,6 +695,7 @@ class EditorTab(QWidget):
         
         overlay_group.setLayout(overlay_layout)
         layout.addWidget(overlay_group)
+
 
         # -- Global Estimation Info --
         self.global_est_label = QLabel("📊 Thêm tác vụ và chọn Thư mục Nguồn để máy tính toán.")
@@ -685,6 +851,8 @@ class EditorTab(QWidget):
             self.only_under_1min_checkbox.setChecked(bool(s['only_under_1min']))
         if 'trim_long_videos' in s and hasattr(self, 'trim_long_videos_checkbox'):
             self.trim_long_videos_checkbox.setChecked(bool(s['trim_long_videos']))
+        if 'max_input_duration' in s and hasattr(self, 'max_input_duration_spin'):
+            self.max_input_duration_spin.setValue(int(s['max_input_duration']))
             
         # 12. Output Naming / Prefix
         if 'output_prefix' in s and hasattr(self, 'output_prefix_input'):
@@ -695,6 +863,32 @@ class EditorTab(QWidget):
         # 13. GPU Use
         if 'use_gpu' in s and hasattr(self, 'gpu_checkbox'):
             self.gpu_checkbox.setChecked(bool(s['use_gpu']))
+
+        # 14. Trim / Cut settings
+        if 'trim_mode' in s and hasattr(self, 'trim_mode_none'):
+            mode = s['trim_mode']
+            if mode == 'head_tail':
+                self.trim_mode_head_tail.setChecked(True)
+            elif mode == 'range':
+                self.trim_mode_range.setChecked(True)
+            elif mode == 'skip_segment' and hasattr(self, 'trim_mode_skip'):
+                self.trim_mode_skip.setChecked(True)
+            else:
+                self.trim_mode_none.setChecked(True)
+            self._on_trim_mode_changed()
+        if 'trim_head' in s and hasattr(self, 'trim_head_spin'):
+            self.trim_head_spin.setValue(float(s['trim_head']))
+        if 'trim_tail' in s and hasattr(self, 'trim_tail_spin'):
+            self.trim_tail_spin.setValue(float(s['trim_tail']))
+        if 'trim_from' in s and hasattr(self, 'trim_from_spin'):
+            self.trim_from_spin.setValue(float(s['trim_from']))
+        if 'trim_to' in s and hasattr(self, 'trim_to_spin'):
+            self.trim_to_spin.setValue(float(s['trim_to']))
+        if 'skip_from' in s and hasattr(self, 'skip_from_spin'):
+            self.skip_from_spin.setValue(float(s['skip_from']))
+        if 'skip_to' in s and hasattr(self, 'skip_to_spin'):
+            self.skip_to_spin.setValue(float(s['skip_to']))
+
 
     def load_config(self, silent=False):
         # PyQt6 clicked signal checked parameter is passed as first arg when connected directly.
@@ -775,6 +969,15 @@ class EditorTab(QWidget):
             return 60
     
     def get_current_settings(self):
+        # Determine trim mode
+        trim_mode = 'none'
+        if hasattr(self, 'trim_mode_head_tail') and self.trim_mode_head_tail.isChecked():
+            trim_mode = 'head_tail'
+        elif hasattr(self, 'trim_mode_range') and self.trim_mode_range.isChecked():
+            trim_mode = 'range'
+        elif hasattr(self, 'trim_mode_skip') and self.trim_mode_skip.isChecked():
+            trim_mode = 'skip_segment'
+
         return {
             'min_videos': getattr(self, 'min_videos_spin', None) and self.min_videos_spin.value() or 2,
             'speed': self.speed_spin.value(),
@@ -794,9 +997,19 @@ class EditorTab(QWidget):
             'film_grain': getattr(self, 'film_grain_checkbox', None) and self.film_grain_checkbox.isChecked(),
             'only_under_1min': self.only_under_1min_checkbox.isChecked(),
             'trim_long_videos': getattr(self, 'trim_long_videos_checkbox', None) and self.trim_long_videos_checkbox.isChecked(),
+            'max_input_duration': getattr(self, 'max_input_duration_spin', None) and self.max_input_duration_spin.value() or 0,
             'output_prefix': getattr(self, 'output_prefix_input', None) and self.output_prefix_input.text().strip(),
             'date_naming': getattr(self, 'date_naming_checkbox', None) and self.date_naming_checkbox.isChecked(),
             'use_gpu': self.gpu_checkbox.isChecked(),
+            # Trim / Cut settings
+            'trim_mode': trim_mode,
+            'trim_head': getattr(self, 'trim_head_spin', None) and self.trim_head_spin.value() or 0.0,
+            'trim_tail': getattr(self, 'trim_tail_spin', None) and self.trim_tail_spin.value() or 0.0,
+            'trim_from': getattr(self, 'trim_from_spin', None) and self.trim_from_spin.value() or 0.0,
+            'trim_to': getattr(self, 'trim_to_spin', None) and self.trim_to_spin.value() or 0.0,
+            # Skip Segment settings
+            'skip_from': getattr(self, 'skip_from_spin', None) and self.skip_from_spin.value() or 0.0,
+            'skip_to': getattr(self, 'skip_to_spin', None) and self.skip_to_spin.value() or 0.0,
         }
 
     def toggle_duration_visibility(self):
@@ -804,6 +1017,18 @@ class EditorTab(QWidget):
         is_skipping = self.skip_merge_checkbox.isChecked()
         if hasattr(self, 'duration_container'):
             self.duration_container.setVisible(not is_skipping)
+
+    def _on_trim_mode_changed(self):
+        """Show/hide trim sub-controls depending on selected mode"""
+        is_head_tail = hasattr(self, 'trim_mode_head_tail') and self.trim_mode_head_tail.isChecked()
+        is_range = hasattr(self, 'trim_mode_range') and self.trim_mode_range.isChecked()
+        is_skip = hasattr(self, 'trim_mode_skip') and self.trim_mode_skip.isChecked()
+        if hasattr(self, 'trim_head_tail_widget'):
+            self.trim_head_tail_widget.setVisible(is_head_tail)
+        if hasattr(self, 'trim_range_widget'):
+            self.trim_range_widget.setVisible(is_range)
+        if hasattr(self, 'trim_skip_widget'):
+            self.trim_skip_widget.setVisible(is_skip)
 
     def update_estimation_debounced(self):
         self.estimation_timer.stop()
@@ -853,12 +1078,14 @@ class EditorTab(QWidget):
         skip_merge = self.skip_merge_checkbox.isChecked()
         target_duration = self.get_target_duration()
         is_free_mode = hasattr(self, 'duration_free') and self.duration_free.isChecked()
+        merge_count = self.min_videos_spin.value() if hasattr(self, 'min_videos_spin') else 2
         
         valid_tasks = 0
         total_estimated = 0
         
         for w, (est, v_count) in zip(self.task_widgets, results):
-            w.set_estimation(est, v_count, skip_merge, target_duration)
+            w.set_estimation(est, v_count, skip_merge, target_duration,
+                             is_free_mode=is_free_mode, merge_count=merge_count)
             if est != -1:
                 valid_tasks += 1
                 if not skip_merge and est > 0:
@@ -872,7 +1099,11 @@ class EditorTab(QWidget):
         else:
             can_run = total_estimated > 0
             if is_free_mode:
-                self.global_est_label.setText(f"📋 Tổng quát: Dự kiến xuất {total_estimated} clip gộp (không giới hạn thời lượng) từ tổng số {total_videos} video gốc.")
+                self.global_est_label.setText(
+                    f"📋 Tổng quát: Dự kiến xuất {total_estimated} clip gộp "
+                    f"(mỗi clip = {merge_count} video, không giới hạn thời lượng) "
+                    f"từ tổng số {total_videos} video gốc."
+                )
             else:
                 self.global_est_label.setText(f"📋 Tổng quát: Dự kiến xuất {total_estimated} clip dài (~{target_duration}s) từ tổng số {total_videos} video gốc.")
             
@@ -1018,6 +1249,9 @@ class EditorTab(QWidget):
 
         settings = self.get_current_settings()
 
+        # Lưu thông tin tasks để sau dùng cho subtitle
+        self._pending_tasks = tasks
+
         self.run_btn.setEnabled(False)
         self.run_btn.setText("⏳ Processing...")
         self.stop_btn.setEnabled(True)
@@ -1033,7 +1267,7 @@ class EditorTab(QWidget):
     def stop_processing(self):
         if self.processor_thread and self.processor_thread.isRunning():
             self.processor_thread.stop()
-            self.log_message.emit("⏹️ Stopping processing...")
+            self.log_message.emit('Stopping processing...')
             self.stop_btn.setEnabled(False)
             self.progress_bar.setVisible(False)
 
@@ -1042,7 +1276,7 @@ class EditorTab(QWidget):
 
     def on_finished(self):
         self.run_btn.setEnabled(True)
-        self.run_btn.setText("▶ Start Processing")
+        self.run_btn.setText('Start Processing')
         self.stop_btn.setEnabled(False)
         self.progress_bar.setVisible(False)
         
@@ -1051,10 +1285,10 @@ class EditorTab(QWidget):
             elapsed = time.time() - self.start_time
             mins = int(elapsed // 60)
             secs = int(elapsed % 60)
-            self.log_message.emit(f"⏱️ Tổng thời gian xử lý: {mins} phút {secs} giây.")
+            self.log_message.emit(f'Tong thoi gian xu ly: {mins} phut {secs} giay.')
         
-        if self.processor_thread and not self.processor_thread.is_running:
-            QMessageBox.information(self, "Stopped", "Processing was stopped by user.")
+        was_stopped = self.processor_thread and not self.processor_thread.is_running
+        if was_stopped:
+            QMessageBox.information(self, 'Stopped', 'Processing was stopped by user.')
         else:
-            QMessageBox.information(self, "Finished", "Hoàn tất xử lý hàng loạt tất cả các tác vụ Editor!")
-
+            QMessageBox.information(self, 'Finished', 'Hoan tat xu ly tat ca cac tac vu Editor!')
