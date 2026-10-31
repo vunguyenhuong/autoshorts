@@ -711,16 +711,42 @@ class ThumbnailDownloaderThread(QThread):
 
 
 
-# Paths for FFmpeg and FFprobe
+# Paths for FFmpeg, FFprobe and Directories
 if getattr(sys, 'frozen', False):
-    BASE_DIR = Path(sys._MEIPASS)
+    BASE_DIR = Path(getattr(sys, '_MEIPASS', Path(sys.executable).parent))
     EXE_DIR = Path(sys.executable).parent
 else:
-    BASE_DIR = Path(__file__).parent.parent  # Go up to AutoShorts directory
+    BASE_DIR = Path(__file__).resolve().parent.parent
     EXE_DIR = BASE_DIR
 
-FFMPEG_EXE = str(EXE_DIR / "ffmpeg" / "ffmpeg.exe")
-FFPROBE_EXE = str(EXE_DIR / "ffmpeg" / "ffprobe.exe")
+def _find_ffmpeg_path():
+    for base in [EXE_DIR, BASE_DIR]:
+        for cand in [
+            base / "ffmpeg" / "bin" / "ffmpeg.exe",
+            base / "ffmpeg" / "ffmpeg.exe",
+            base / "ffmpeg.exe"
+        ]:
+            if cand.exists():
+                return str(cand)
+    import shutil
+    w = shutil.which("ffmpeg")
+    return w or "ffmpeg.exe"
+
+def _find_ffprobe_path():
+    for base in [EXE_DIR, BASE_DIR]:
+        for cand in [
+            base / "ffmpeg" / "bin" / "ffprobe.exe",
+            base / "ffmpeg" / "ffprobe.exe",
+            base / "ffprobe.exe"
+        ]:
+            if cand.exists():
+                return str(cand)
+    import shutil
+    w = shutil.which("ffprobe")
+    return w or "ffprobe.exe"
+
+FFMPEG_EXE = _find_ffmpeg_path()
+FFPROBE_EXE = _find_ffprobe_path()
 
 
 def run_ffmpeg_silent(cmd):
